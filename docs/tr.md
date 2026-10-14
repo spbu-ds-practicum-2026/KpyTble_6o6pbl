@@ -118,6 +118,44 @@
 ---
 
 ##  Архитектура системы
+Основные компоненты:
+1. Web Client — веб-клиент, предоставляющий интерфейс комнаты, очереди и чата; управляет встроенным плеером Rutube по серверному состоянию.
+2. API Gateway — входная точка в систему; принимает REST-запросы и WebSocket-команды, маршрутизирует их в сервисы и рассылает события участникам.
+3. Room Service — основной сервис, управляющий комнатами, участниками, ролями, очередью и воспроизведением; проверяет права, последовательно обрабатывает команды и предотвращает их повторное выполнение.
+4. Chat Service — сервис сообщений; проверяет членство отправителя, сохраняет сообщения с защитой от дублей и передаёт их API Gateway для рассылки.
+5. Room DB — транзакционная база данных Room Service; хранит комнаты, участников, сессии, очередь, состояние воспроизведения и результаты обработки команд.
+6. Chat DB — база данных Chat Service; хранит сообщения и результаты обработки команд отправки.
+7. Rutube — внешняя видеоплатформа, предоставляющая встроенный плеер и видеопоток непосредственно браузеру пользователя.
+
+```mermaid
+graph TD
+    subgraph Client["Клиент"]
+        WebClient["Веб-клиент"]
+    end
+
+    subgraph Services["Сервисы"]
+        APIGateway["API Gateway"]
+        RoomService["Room Service"]
+        ChatService["Chat Service"]
+    end
+
+    subgraph Databases["Базы данных"]
+        RoomDB[("Room DB")]
+        ChatDB[("Chat DB")]
+    end
+
+    subgraph External["Внешние сервисы"]
+        Rutube["Rutube"]
+    end
+
+    WebClient <-->|REST / WebSocket| APIGateway
+    APIGateway <-->|HTTP| RoomService
+    APIGateway <-->|HTTP| ChatService
+    ChatService -->|Проверка участника| RoomService
+    RoomService -->|SQL| RoomDB
+    ChatService -->|SQL| ChatDB
+    WebClient -->|Embed / видео| Rutube
+```
 
 ---
 
