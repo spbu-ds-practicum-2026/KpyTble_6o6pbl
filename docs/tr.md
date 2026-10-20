@@ -191,6 +191,231 @@ graph TD
 
 ## Технические сценарии
 
+### 1. Создание комнаты и подключение участника
+1. Клиент отправляет запрос через API Gateway.
+2. Room Service создаёт комнату, назначает ведущего и сохраняет данные в Room DB.
+3. Подключающийся участник получает токен сессии.
+4. Новый участник получает текущее состояние комнаты, очередь видео и список участников.
+5. Остальные участники получают обновлённый список участников комнаты.
+
+```mermaid
+sequenceDiagram
+    actor User as Пользователь
+    participant Client as Web Client
+    participant Gateway as API Gateway
+    participant Room as Room Service
+    participant DB as Room DB
+
+    User->>Client: Создать комнату
+    Client->>Gateway: Запрос создания
+    Gateway->>Room: Создать комнату
+    Room->>DB: Сохранить комнату, ведущего и сессию
+    DB-->>Room: Данные сохранены
+    Room-->>Gateway: Ссылка и токен сессии
+    Gateway-->>Client: Комната создана
+
+    User->>Client: Подключиться по ссылке
+    Client->>Gateway: Запрос подключения
+    Gateway->>Room: Добавить участника
+    Room->>DB: Сохранить участника и сессию
+    DB-->>Room: Данные сохранены
+    Room-->>Gateway: Токен сессии
+    Gateway-->>Client: Подключение разрешено
+    Client->>Gateway: Открыть WebSocket с токеном
+    Gateway->>Room: Проверить сессию и получить состояние
+    Room-->>Gateway: Полное состояние и список участников
+	Gateway-->>Client: Актуальное состояние комнаты
+    Gateway-->>Client: Рассылка обновлённого списка участникам всемучастникам
+```
+
+### 2. Управление воспроизведением
+1. Клиент отправляет команду с уникальным commandId.
+2. Room Service проверяет права и последовательно обрабатывает команду.
+3. Состояние, новая версия и результат команды сохраняются одной транзакцией.
+4. Gateway отправляет подтверждение и рассылает состояние участникам.
+5. Клиенты применяют новую версию состояния к своим плеерам.
+
+```mermaid
+sequenceDiagram
+    participant Client as Web Client
+    participant Gateway as API Gateway
+    participant Room as Room Service
+    participant DB as Room DB
+    participant Others as Другие участники
+
+    Client->>Gateway: Команда воспроизведения с commandId
+    Gateway->>Room: Передать команду и сессию
+    Room->>DB: Проверить права и commandId
+    DB-->>Room: Команда новая, права подтверждены
+    Room->>DB: Сохранить состояние, новую версию и результат команды
+    DB-->>Room: Транзакция завершена
+    Room-->>Gateway: Подтверждение и новое состояние
+    Gateway-->>Client: Подтверждение и новое состояние
+    Gateway-->>Others: Новое состояние
+```
+
+### 3. Изменение очереди видео
+1. Клиент отправляет команду добавления, удаления или перемещения видео.
+2. Room Service проверяет права, валидность операции и commandId.
+3. Изменения очереди, новая версия и результат команды сохраняются одной транзакцией.
+4. Gateway рассылает новое состояние участникам.
+
+```mermaid
+sequenceDiagram
+    participant Client as Web Client
+    participant Gateway as API Gateway
+    participant Room as Room Service
+    participant DB as Room DB
+    participant Others as Другие участники
+
+    Client->>Gateway: Изменить очередь, commandId
+    Gateway->>Room: Передать команду и сессию
+    Room->>DB: Проверить права и commandId
+    DB-->>Room: Команда новая, права подтверждены
+    Room->>Room: Проверить валидность опепрации
+    Room->>DB: Сохранить очередь, состояние видео, новую версию и результат команды
+    DB-->>Room: Транзакция завершена
+    Room-->>Gateway: Подтверждение и новое состояние
+    Gateway-->>Client: Подтверждение и новое состояние
+    Gateway-->>Others: Новое состояние
+```
+
+### 4. Позднее подключение и синхронизация плеера
+1. Клиент запрашивает актуальное состояние комнаты.
+2. Room Service получает сохранённое состояние и рассчитывает текущую позицию.
+3. Gateway передаёт состояние клиенту.
+4. Клиент загружает видео и устанавливает позицию и состояние воспроизведения.
+
+```mermaid
+sequenceDiagram
+    participant Client as Web Client
+    participant Gateway as API Gateway
+    participant Room as Room Service
+    participant DB as Room DB
+
+    Client->>Gateway: Запросить актуальное состояние
+    Gateway->>Room: Получить состояние комнаты
+    Room->>DB: Прочитать состояние воспроизведения
+    DB-->>Room: Видео, опорная позиция, время фиксации, пауза и версия
+    Room->>Room: Рассчитать текущую позицию
+    Room-->>Gateway: Актуальное состояние и серверное время
+    Gateway-->>Client: Актуальное состояние и серверное время
+    Client->>Client: Загрузить видео и применить состояние к плееру
+```
+### 5. Восстановление соединения и повтор команды
+
+1. После обрыва клиент переподключается с токеном сессии.
+2. Получает актуальное состояние комнаты.
+3. Повторяет неподтверждённую команду с прежним commandId.
+4. Room Service возвращает сохранённый результат либо выполняет ещё не обработанную команду.
+5. Клиент не заменяет новое состояние устаревшей версией из подтверждения.
+
+```mermaid
+sequenceDiagram
+    participant Client as Web Client
+    participant Gateway as API Gateway
+    participant Room as Room Service
+    participant DB as Room DB
+
+    Client->>Gateway: Команда с commandId
+    Gateway->>Room: Выполнить команду
+    Room->>DB: Сохранить изменение и результат одной транзакцией
+    DB-->>Room: Транзакция завершена
+    Room-->>Gateway: Подтверждение
+    Note over Client,Gateway: Соединение оборвалось, подтверждение не получено
+
+    Client->>Gateway: Переподключиться с токеном
+    Gateway->>Room: Проверить сессию и получить состояние
+    Room-->>Gateway: Актуальное состояние
+    Gateway-->>Client: Полное состояние комнаты
+    Client->>Gateway: Повторить команду с прежним commandId
+    Gateway->>Room: Передать повтор команды
+    Room->>DB: Найти сохранённый результат
+    DB-->>Room: Команда уже выполнена
+    Room-->>Gateway: Сохранённое подтверждение
+    Gateway-->>Client: Подтверждение без повторного действия
+```
+
+### 6. Отправка сообщения в чат
+1. Клиент отправляет текст сообщения и commandId.
+2. Chat Service проверяет членство отправителя через Room Service.
+3. Сообщение и результат команды сохраняются одной транзакцией.
+4. Gateway рассылает сообщение участникам комнаты.
+
+```mermaid
+sequenceDiagram
+    participant Client as Web Client
+    participant Gateway as API Gateway
+    participant Chat as Chat Service
+    participant Room as Room Service
+    participant DB as Chat DB
+    participant Others as Другие участники
+
+    Client->>Gateway: Текст сообщения и commandId
+    Gateway->>Chat: Передать сообщение и сессию
+    Chat->>Room: Проверить членство отправителя в комнате
+    Room-->>Chat: Членство подтверждено
+    Chat->>DB: Проверить commandId
+    DB-->>Chat: Команда новая
+    Chat->>DB: Сохранить сообщение и результат команды одной транзакцией
+    DB-->>Chat: Транзакция завершена
+    Chat-->>Gateway: Подтверждение и сообщение с ID и временем
+    Gateway-->>Client: Подтверждение и сообщение
+    Gateway-->>Others: Новое сообщение
+```
+
+### 7. Отключение ведущего и передача роли
+1. Gateway обнаруживает потерю соединения ведущего и сообщает Room Service.
+2. Room Service ожидает восстановления соединения в течение установленного срока.
+3. После истечения срока выбирает самого раннего из подключённых участников.
+4. Атомарно передаёт ему роль ведущего.
+5. Gateway уведомляет участников комнаты.
+
+```mermaid
+sequenceDiagram
+    participant Gateway as API Gateway
+    participant Room as Room Service
+    participant DB as Room DB
+    participant Members as Участники комнаты
+
+    Gateway->>Room: Соединение ведущего потеряно
+    Room->>Room: Дождаться истечения срока восстановления
+    Room->>DB: Проверить отключение и выбрать нового ведущего
+    DB-->>Room: Самый ранний подключённый участник
+    Room->>DB: Атомарно передать роль ведущего
+    DB-->>Room: Изменения сохранены
+    Room-->>Gateway: Обновлённый список участников и ролей
+    Gateway-->>Members: Новый ведущий комнаты
+```
+
+### 8. Частичный отказ и восстановление сервиса
+1. Room Service становится недоступен, клиент не получает подтверждение команды.
+2. После восстановления сервиса клиент запрашивает актуальное состояние.
+3. Неподтверждённая команда повторяется с прежним commandId.
+4. Room Service находит сохранённый результат и возвращает его без повторного выполнения.
+
+```mermaid
+sequenceDiagram
+    participant Client as Web Client
+    participant Gateway as API Gateway
+    participant Room as Room Service
+    participant DB as Room DB
+
+    Client->>Gateway: Команда с commandId
+    Gateway->>Room: Передать команду
+    Room->>DB: Сохранить изменение и результат одной транзакцией
+    DB-->>Room: Транзакция завершена
+    Note over Room: Сбой до отправки подтверждения
+    Gateway-->>Client: Подтверждение не получено
+    Note over Room: Сервис восстановлен
+    Client->>Gateway: Повторить команду с прежним commandId
+    Gateway->>Room: Передать повтор команды
+    Room->>DB: Найти результат по commandId
+    DB-->>Room: Сохранённый результат
+    Room-->>Gateway: Подтверждение без повторного выполнения
+    Gateway-->>Client: Подтверждение команды
+```
+
 ---
 
 ## План разработки и тестирования
