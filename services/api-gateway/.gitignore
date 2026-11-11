@@ -1,2 +1,22 @@
+# Gradle - локальный кеш и результаты сборки
 .gradle/
 build/
+
+# Java - скомпиленные классы
+*.class
+
+# Eclipse / JDT LS / Buildship
+.classpath
+.project
+.settings/
+.factorypath
+bin/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+
+# Временные файлы VIM
+*.swp
+*.swo
+*~

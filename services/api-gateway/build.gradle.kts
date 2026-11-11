@@ -1,5 +1,6 @@
 plugins {
   java
+  id("org.springframework.boot") version "3.5.16"
 }
 
 group = "plotina"
@@ -13,4 +14,9 @@ java{
 
 repositories{
   mavenCentral()
+}
+
+dependencies{
+  implementation(platform("org.springframework.boot:spring-boot-dependencies:3.5.16"))
+  implementation("org.springframework.boot:spring-boot-starter-web")
 }
