@@ -7,6 +7,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.springframework.stereotype.Service;
 
 import plotina.gateway.backend.RoomBackend;
+import plotina.gateway.backend.RoomNotFoundException;
 import plotina.gateway.backend.RoomSnapshot;
 
 @Service
@@ -16,11 +17,11 @@ public class FakeRoomBackend implements RoomBackend {
 
   @Override
   public RoomSnapshot getSnapshot(String roomId) {
-    return new RoomSnapshot(
-        roomId,
-        1,
-        true,
-        0.0);
+    RoomSnapshot snapshot = rooms.get(roomId);
+    if (snapshot == null) {
+      throw new RoomNotFoundException(roomId);
+    }
+    return snapshot;
   }
 
   @Override
