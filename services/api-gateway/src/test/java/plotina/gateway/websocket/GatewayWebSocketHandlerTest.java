@@ -24,7 +24,6 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.verifyNoInteractions;
 
@@ -55,6 +54,76 @@ class GatewayWebSocketHandlerTest {
         new WebSocketSender(objectMapper),
         new RoomCommandService(roomBackend, sessionBackend),
         broadcaster);
+  }
+
+  @Test
+  void shouldSeekRoomAndBroadcastState() throws Exception {
+    authenticateSocket();
+
+    RoomSnapshot state = new RoomSnapshot(
+        "room-1",
+        2L,
+        true,
+        120.5);
+
+    when(roomBackend.seek(
+        "room-1",
+        "valid-token",
+        "command-seek",
+        120.5)).thenReturn(state);
+
+    handler.handleTextMessage(socket, new TextMessage("""
+        {
+          "type": "playback.seek",
+          "requestId": "request-seek",
+          "payload": {
+            "commandId": "command-seek",
+            "sessionToken": "valid-token",
+            "positionSeconds": 120.5
+          }
+        }
+        """));
+
+    JsonNode response = readSentMessage();
+
+    assertEquals(
+        "command.ack",
+        response.path("type").asText());
+
+    verify(roomBackend).seek(
+        "room-1",
+        "valid-token",
+        "command-seek",
+        120.5);
+
+    verify(broadcaster).broadcast(
+        "room-1",
+        new ServerMessage("room.state", null, state));
+  }
+
+  @Test
+  void shouldRejectNegativeSeekPosition() throws Exception {
+    authenticateSocket();
+
+    handler.handleTextMessage(socket, new TextMessage("""
+        {
+          "type": "playback.seek",
+          "requestId": "request-invalid-seek",
+          "payload": {
+            "commandId": "command-invalid-seek",
+            "sessionToken": "valid-token",
+            "positionSeconds": -10
+          }
+        }
+        """));
+
+    JsonNode response = readSentMessage();
+
+    assertEquals(
+        "INVALID_MESSAGE",
+        response.path("payload").path("code").asText());
+
+    verifyNoInteractions(roomBackend, broadcaster);
   }
 
   private void authenticateSocket() throws Exception {
@@ -123,6 +192,57 @@ class GatewayWebSocketHandlerTest {
         "room-1",
         "valid-token",
         "command-1");
+
+    verify(broadcaster).broadcast(
+        "room-1",
+        new ServerMessage("room.state", null, state));
+  }
+
+  @Test
+  void shouldPlayRoomAndBroadcastState() throws Exception {
+    authenticateSocket();
+
+    RoomSnapshot state = new RoomSnapshot(
+        "room-1",
+        2L,
+        false,
+        12.5);
+
+    when(roomBackend.play(
+        "room-1",
+        "valid-token",
+        "command-play")).thenReturn(state);
+
+    handler.handleTextMessage(socket, new TextMessage("""
+        {
+          "type": "playback.play",
+          "requestId": "request-play",
+          "payload": {
+            "commandId": "command-play",
+            "sessionToken": "valid-token"
+          }
+        }
+        """));
+
+    JsonNode response = readSentMessage();
+
+    assertEquals(
+        "command.ack",
+        response.path("type").asText());
+    assertEquals(
+        "request-play",
+        response.path("requestId").asText());
+    assertEquals(
+        "command-play",
+        response.path("payload").path("commandId").asText());
+    assertEquals(
+        2L,
+        response.path("payload").path("stateVersion").asLong());
+
+    verify(roomBackend).play(
+        "room-1",
+        "valid-token",
+        "command-play");
 
     verify(broadcaster).broadcast(
         "room-1",

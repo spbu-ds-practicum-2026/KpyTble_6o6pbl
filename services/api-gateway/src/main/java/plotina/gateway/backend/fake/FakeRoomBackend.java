@@ -57,4 +57,41 @@ public class FakeRoomBackend implements RoomBackend {
     });
   }
 
+  @Override
+  public RoomSnapshot play(
+      String roomId,
+      String sessionToken,
+      String commandId) {
+    return rooms.compute(roomId, (id, current) -> {
+      if (current == null) {
+        throw new RoomNotFoundException(id);
+      }
+
+      return new RoomSnapshot(
+          current.roomId(),
+          current.version() + 1,
+          false,
+          current.positionSeconds());
+    });
+  }
+
+  @Override
+  public RoomSnapshot seek(
+      String roomId,
+      String sessionToken,
+      String commandId,
+      double positionSeconds) {
+    return rooms.compute(roomId, (id, current) -> {
+      if (current == null) {
+        throw new RoomNotFoundException(id);
+      }
+
+      return new RoomSnapshot(
+          current.roomId(),
+          current.version() + 1,
+          current.paused(),
+          positionSeconds);
+    });
+  }
+
 }

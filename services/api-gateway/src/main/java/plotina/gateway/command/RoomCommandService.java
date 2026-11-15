@@ -36,6 +36,71 @@ public class RoomCommandService {
         commandId);
   }
 
+  public RoomSnapshot seek(
+      String connectionUserId,
+      String connectionRoomId,
+      String sessionToken,
+      String commandId,
+      double positionSeconds) {
+    verifySession(
+        connectionUserId,
+        connectionRoomId,
+        sessionToken);
+
+    if (!Double.isFinite(positionSeconds) || positionSeconds < 0) {
+      throw new CommandRejectedException(
+          "INVALID_MESSAGE",
+          "Position must be a finite non-negative number");
+    }
+
+    return roomBackend.seek(
+        connectionRoomId,
+        sessionToken,
+        commandId,
+        positionSeconds);
+  }
+
+  public RoomSnapshot executePlayback(
+      String type,
+      String connectionUserId,
+      String connectionRoomId,
+      String sessionToken,
+      String commandId) {
+    return switch (type) {
+      case "playback.play" -> play(
+          connectionUserId,
+          connectionRoomId,
+          sessionToken,
+          commandId);
+
+      case "playback.pause" -> pause(
+          connectionUserId,
+          connectionRoomId,
+          sessionToken,
+          commandId);
+
+      default -> throw new CommandRejectedException(
+          "UNKNOWN_MESSAGE_TYPE",
+          "Unsupported playback command");
+    };
+  }
+
+  public RoomSnapshot play(
+      String connectionUserId,
+      String connectionRoomId,
+      String sessionToken,
+      String commandId) {
+    verifySession(
+        connectionUserId,
+        connectionRoomId,
+        sessionToken);
+
+    return roomBackend.play(
+        connectionRoomId,
+        sessionToken,
+        commandId);
+  }
+
   private void verifySession(
       String connectionUserId,
       String connectionRoomId,

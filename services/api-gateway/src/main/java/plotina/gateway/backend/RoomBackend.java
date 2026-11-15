@@ -11,4 +11,15 @@ public interface RoomBackend {
       String sessionToken,
       String commandId);
 
+  RoomSnapshot play(
+      String roomId,
+      String sessionToken,
+      String commandId);
+
+  RoomSnapshot seek(
+      String roomId,
+      String sessionToken,
+      String commandId,
+      double positionSeconds);
+
 }

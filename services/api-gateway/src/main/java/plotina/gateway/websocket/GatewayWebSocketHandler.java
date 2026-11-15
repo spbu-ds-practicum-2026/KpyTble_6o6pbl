@@ -13,7 +13,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import plotina.gateway.session.SessionBackend;
 import plotina.gateway.session.SessionInfo;
-import plotina.gateway.backend.RoomBackend;
 import plotina.gateway.backend.RoomNotFoundException;
 import plotina.gateway.backend.RoomSnapshot;
 import plotina.gateway.command.CommandRejectedException;
@@ -46,7 +45,7 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
     this.broadcaster = broadcaster;
   }
 
-  private void pause(
+  private void handlePlaybackCommand(
       WebSocketSession socket,
       ClientMessage request) throws Exception {
     JsonNode payload = request.payload();
@@ -87,11 +86,32 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
     RoomSnapshot state;
 
     try {
-      state = roomCommandService.pause(
-          identity.userId(),
-          identity.roomId(),
-          tokenNode.asText(),
-          commandIdNode.asText());
+      if (request.type().equals("playback.seek")) {
+        JsonNode positionNode = payload.get("positionSeconds");
+
+        if (positionNode == null || !positionNode.isNumber()) {
+          sendError(
+              socket,
+              request.requestId(),
+              "INVALID_MESSAGE",
+              "Position must be a number");
+          return;
+        }
+
+        state = roomCommandService.seek(
+            identity.userId(),
+            identity.roomId(),
+            tokenNode.asText(),
+            commandIdNode.asText(),
+            positionNode.doubleValue());
+      } else {
+        state = roomCommandService.executePlayback(
+            request.type(),
+            identity.userId(),
+            identity.roomId(),
+            tokenNode.asText(),
+            commandIdNode.asText());
+      }
     } catch (CommandRejectedException exception) {
       sendError(
           socket,
@@ -240,7 +260,8 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
 
       case "session.authenticate" -> authenticate(session, request);
 
-      case "playback.pause" -> pause(session, request);
+      case "playback.pause", "playback.play", "playback.seek" ->
+        handlePlaybackCommand(session, request);
 
       default -> sendError(
           session,
