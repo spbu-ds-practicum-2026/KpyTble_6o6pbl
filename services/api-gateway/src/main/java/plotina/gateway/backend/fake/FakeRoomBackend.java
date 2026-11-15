@@ -39,4 +39,22 @@ public class FakeRoomBackend implements RoomBackend {
     return snapshot;
   }
 
+  @Override
+  public RoomSnapshot pause(
+      String roomId,
+      String sessionToken,
+      String commandId) {
+    return rooms.compute(roomId, (id, current) -> {
+      if (current == null) {
+        throw new RoomNotFoundException(id);
+      }
+
+      return new RoomSnapshot(
+          current.roomId(),
+          current.version() + 1,
+          true,
+          current.positionSeconds());
+    });
+  }
+
 }

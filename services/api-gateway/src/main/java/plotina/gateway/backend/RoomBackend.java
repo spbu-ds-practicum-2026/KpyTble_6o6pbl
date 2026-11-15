@@ -6,4 +6,9 @@ public interface RoomBackend {
 
   RoomSnapshot getSnapshot(String roomId);
 
+  RoomSnapshot pause(
+      String roomId,
+      String sessionToken,
+      String commandId);
+
 }

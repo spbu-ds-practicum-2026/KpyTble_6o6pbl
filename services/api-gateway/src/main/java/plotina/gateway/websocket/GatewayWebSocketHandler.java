@@ -13,6 +13,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import plotina.gateway.session.SessionBackend;
 import plotina.gateway.session.SessionInfo;
+import plotina.gateway.backend.RoomBackend;
+import plotina.gateway.backend.RoomNotFoundException;
+import plotina.gateway.backend.RoomSnapshot;
 
 @Component
 public class GatewayWebSocketHandler extends TextWebSocketHandler {
@@ -23,18 +26,106 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
   private final SessionBackend sessionBackend;
   private final ConnectionRegistry connectionRegistry;
   private final WebSocketSender sender;
+  private final RoomBackend roomBackend;
+  private final RoomBroadcaster broadcaster;
 
   public GatewayWebSocketHandler(
-    ObjectMapper objectMapper,
-    SessionBackend sessionBackend,
-    ConnectionRegistry connectionRegistry,
-    WebSocketSender sender
-) {
+      ObjectMapper objectMapper,
+      SessionBackend sessionBackend,
+      ConnectionRegistry connectionRegistry,
+      WebSocketSender sender,
+      RoomBackend roomBackend,
+      RoomBroadcaster broadcaster) {
     this.objectMapper = objectMapper;
     this.sessionBackend = sessionBackend;
     this.connectionRegistry = connectionRegistry;
     this.sender = sender;
-}
+    this.roomBackend = roomBackend;
+    this.broadcaster = broadcaster;
+  }
+
+  private void pause(
+      WebSocketSession socket,
+      ClientMessage request) throws Exception {
+    JsonNode payload = request.payload();
+
+    JsonNode tokenNode = payload == null
+        ? null
+        : payload.get("sessionToken");
+
+    JsonNode commandIdNode = payload == null
+        ? null
+        : payload.get("commandId");
+
+    if (tokenNode == null
+        || !tokenNode.isTextual()
+        || tokenNode.asText().isBlank()
+        || commandIdNode == null
+        || !commandIdNode.isTextual()
+        || commandIdNode.asText().isBlank()) {
+      sendError(
+          socket,
+          request.requestId(),
+          "INVALID_MESSAGE",
+          "Session token and command ID must be non-empty strings");
+      return;
+    }
+
+    AuthenticatedSession connectionIdentity = (AuthenticatedSession) socket.getAttributes()
+        .get(SESSION_ATTRIBUTE);
+
+    SessionInfo commandIdentity = sessionBackend
+        .findByToken(tokenNode.asText())
+        .orElse(null);
+
+    if (connectionIdentity == null || commandIdentity == null) {
+      sendError(
+          socket,
+          request.requestId(),
+          "UNAUTHORIZED",
+          "Valid session is required");
+      return;
+    }
+
+    if (!connectionIdentity.userId().equals(commandIdentity.userId())
+        || !connectionIdentity.roomId().equals(commandIdentity.roomId())) {
+      sendError(
+          socket,
+          request.requestId(),
+          "FORBIDDEN",
+          "Command session does not match the connection");
+      return;
+    }
+
+    RoomSnapshot state;
+
+    try {
+      state = roomBackend.pause(
+          connectionIdentity.roomId(),
+          tokenNode.asText(),
+          commandIdNode.asText());
+    } catch (RoomNotFoundException exception) {
+      sendError(
+          socket,
+          request.requestId(),
+          "ROOM_NOT_FOUND",
+          "Room not found");
+      return;
+    }
+
+    broadcaster.broadcast(
+        state.roomId(),
+        new ServerMessage("room.state", null, state));
+
+    send(
+        socket,
+        new ServerMessage(
+            "command.ack",
+            request.requestId(),
+            new CommandAck(
+                commandIdNode.asText(),
+                state.version())));
+  }
 
   @Override
   public void afterConnectionClosed(
@@ -154,6 +245,8 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
 
       case "session.authenticate" -> authenticate(session, request);
 
+      case "playback.pause" -> pause(session, request);
+
       default -> sendError(
           session,
           request.requestId(),
@@ -164,9 +257,8 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
   }
 
   private void send(
-    WebSocketSession session,
-    ServerMessage message
-  ) throws Exception {
+      WebSocketSession session,
+      ServerMessage message) throws Exception {
     sender.send(session, message);
   }
 
@@ -192,6 +284,11 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
   public record AuthenticatedSession(
       String userId,
       String roomId) {
+  }
+
+  public record CommandAck(
+      String commandId,
+      long stateVersion) {
   }
 
 }

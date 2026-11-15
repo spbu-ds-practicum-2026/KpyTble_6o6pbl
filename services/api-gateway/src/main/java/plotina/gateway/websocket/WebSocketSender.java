@@ -10,20 +10,19 @@ import org.springframework.web.socket.WebSocketSession;
 @Component
 public class WebSocketSender {
 
-    private final ObjectMapper objectMapper;
+  private final ObjectMapper objectMapper;
 
-    public WebSocketSender(ObjectMapper objectMapper) {
-        this.objectMapper = objectMapper;
+  public WebSocketSender(ObjectMapper objectMapper) {
+    this.objectMapper = objectMapper;
+  }
+
+  public void send(
+      WebSocketSession socket,
+      ServerMessage message) throws IOException {
+    String json = objectMapper.writeValueAsString(message);
+
+    synchronized (socket) {
+      socket.sendMessage(new TextMessage(json));
     }
-
-    public void send(
-        WebSocketSession socket,
-        ServerMessage message
-    ) throws IOException {
-        String json = objectMapper.writeValueAsString(message);
-
-        synchronized (socket) {
-            socket.sendMessage(new TextMessage(json));
-        }
-    }
+  }
 }
