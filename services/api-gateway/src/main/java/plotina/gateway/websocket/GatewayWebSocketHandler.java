@@ -1,5 +1,7 @@
 package plotina.gateway.websocket;
 
+import com.fasterxml.jackson.databind.JsonNode;
+
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
@@ -8,13 +10,79 @@ import org.springframework.web.socket.handler.TextWebSocketHandler;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import plotina.gateway.session.SessionBackend;
+import plotina.gateway.session.SessionInfo;
+
 @Component
 public class GatewayWebSocketHandler extends TextWebSocketHandler {
 
-  private final ObjectMapper objectMapper;
+  private static final String SESSION_ATTRIBUTE = GatewayWebSocketHandler.class.getName() + ".session";
 
-  public GatewayWebSocketHandler(ObjectMapper objectMapper) {
+  private final ObjectMapper objectMapper;
+  private final SessionBackend sessionBackend;
+
+  public GatewayWebSocketHandler(
+      ObjectMapper objectMapper,
+      SessionBackend sessionBackend) {
     this.objectMapper = objectMapper;
+    this.sessionBackend = sessionBackend;
+  }
+
+  private void authenticate(
+      WebSocketSession session,
+      ClientMessage request) throws Exception {
+    if (session.getAttributes().containsKey(SESSION_ATTRIBUTE)) {
+      sendError(
+          session,
+          request.requestId(),
+          "ALREADY_AUTHENTICATED",
+          "Connection is already authenticated");
+      return;
+    }
+
+    JsonNode payload = request.payload();
+    JsonNode tokenNode = payload == null
+        ? null
+        : payload.get("sessionToken");
+
+    if (tokenNode == null
+        || !tokenNode.isTextual()
+        || tokenNode.asText().isBlank()) {
+      sendError(
+          session,
+          request.requestId(),
+          "INVALID_MESSAGE",
+          "Session token must be a non-empty string");
+      return;
+    }
+
+    SessionInfo identity = sessionBackend
+        .findByToken(tokenNode.asText())
+        .orElse(null);
+
+    if (identity == null) {
+      sendError(
+          session,
+          request.requestId(),
+          "UNAUTHORIZED",
+          "Invalid session token");
+      return;
+    }
+
+    AuthenticatedSession authenticatedSession = new AuthenticatedSession(
+        identity.userId(),
+        identity.roomId());
+
+    session.getAttributes().put(
+        SESSION_ATTRIBUTE,
+        authenticatedSession);
+
+    send(
+        session,
+        new ServerMessage(
+            "session.authenticated",
+            request.requestId(),
+            authenticatedSession));
   }
 
   @Override
@@ -43,6 +111,19 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
       return;
     }
 
+    boolean publicMessage = request.type().equals("ping")
+        || request.type().equals("session.authenticate");
+
+    if (!publicMessage
+        && !session.getAttributes().containsKey(SESSION_ATTRIBUTE)) {
+      sendError(
+          session,
+          request.requestId(),
+          "UNAUTHORIZED",
+          "Authenticate the connection first");
+      return;
+    }
+
     switch (request.type()) {
       case "ping" -> send(
           session,
@@ -50,6 +131,8 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
               "pong",
               request.requestId(),
               new PongPayload("ok")));
+
+      case "session.authenticate" -> authenticate(session, request);
 
       default -> sendError(
           session,
@@ -85,4 +168,10 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
 
   public record ErrorPayload(String code, String message) {
   }
+
+  public record AuthenticatedSession(
+      String userId,
+      String roomId) {
+  }
+
 }
