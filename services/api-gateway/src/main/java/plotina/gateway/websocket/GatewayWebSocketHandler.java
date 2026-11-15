@@ -6,6 +6,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
+import org.springframework.web.socket.CloseStatus;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -20,12 +21,26 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
 
   private final ObjectMapper objectMapper;
   private final SessionBackend sessionBackend;
+  private final ConnectionRegistry connectionRegistry;
+  private final WebSocketSender sender;
 
   public GatewayWebSocketHandler(
-      ObjectMapper objectMapper,
-      SessionBackend sessionBackend) {
+    ObjectMapper objectMapper,
+    SessionBackend sessionBackend,
+    ConnectionRegistry connectionRegistry,
+    WebSocketSender sender
+) {
     this.objectMapper = objectMapper;
     this.sessionBackend = sessionBackend;
+    this.connectionRegistry = connectionRegistry;
+    this.sender = sender;
+}
+
+  @Override
+  public void afterConnectionClosed(
+      WebSocketSession session,
+      CloseStatus status) {
+    connectionRegistry.remove(session.getId());
   }
 
   private void authenticate(
@@ -76,6 +91,11 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
     session.getAttributes().put(
         SESSION_ATTRIBUTE,
         authenticatedSession);
+
+    connectionRegistry.register(
+        session,
+        authenticatedSession.userId(),
+        authenticatedSession.roomId());
 
     send(
         session,
@@ -144,10 +164,10 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
   }
 
   private void send(
-      WebSocketSession session,
-      ServerMessage message) throws Exception {
-    String json = objectMapper.writeValueAsString(message);
-    session.sendMessage(new TextMessage(json));
+    WebSocketSession session,
+    ServerMessage message
+  ) throws Exception {
+    sender.send(session, message);
   }
 
   private void sendError(

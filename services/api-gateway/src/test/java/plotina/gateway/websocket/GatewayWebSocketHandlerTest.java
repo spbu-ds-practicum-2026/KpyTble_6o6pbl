@@ -35,11 +35,15 @@ class GatewayWebSocketHandlerTest {
     socket = mock(WebSocketSession.class);
 
     when(socket.getAttributes()).thenReturn(new HashMap<>());
+    when(socket.getId()).thenReturn("socket-1");
 
     handler = new GatewayWebSocketHandler(
         objectMapper,
-        sessionBackend);
-  }
+        sessionBackend,
+        new ConnectionRegistry(),
+        new WebSocketSender(objectMapper)
+    );
+}
 
   @Test
   void shouldAuthenticateWithValidToken() throws Exception {
