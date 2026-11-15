@@ -1,4 +1,4 @@
-package plotina.gateway.session;
+package plotina.gateway.session.backend;
 
 public record SessionInfo(
     String sessionToken,

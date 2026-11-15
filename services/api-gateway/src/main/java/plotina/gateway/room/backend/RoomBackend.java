@@ -1,8 +1,12 @@
-package plotina.gateway.backend;
+package plotina.gateway.room.backend;
+
+import plotina.gateway.room.RoomEntryService.RoomEntryResult;
 
 public interface RoomBackend {
 
-  RoomSnapshot createRoom();
+  RoomEntryResult createRoom();
+
+  RoomEntryResult joinRoom(String roomId);
 
   RoomSnapshot getSnapshot(String roomId);
 

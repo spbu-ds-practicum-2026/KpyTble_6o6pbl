@@ -1,4 +1,4 @@
-package plotina.gateway.backend;
+package plotina.gateway.room.backend;
 
 public class InvalidQueuePositionException extends RuntimeException {
 

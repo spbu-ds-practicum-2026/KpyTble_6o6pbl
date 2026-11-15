@@ -1,4 +1,4 @@
-package plotina.gateway.chat;
+package plotina.gateway.chat.backend;
 
 public interface ChatBackend {
 

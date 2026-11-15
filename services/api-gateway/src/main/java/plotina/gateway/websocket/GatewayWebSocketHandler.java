@@ -11,15 +11,15 @@ import org.springframework.web.socket.CloseStatus;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import plotina.gateway.session.SessionBackend;
-import plotina.gateway.session.SessionInfo;
-import plotina.gateway.backend.RoomNotFoundException;
-import plotina.gateway.backend.RoomSnapshot;
+import plotina.gateway.session.backend.SessionBackend;
+import plotina.gateway.session.backend.SessionInfo;
+import plotina.gateway.room.backend.RoomNotFoundException;
+import plotina.gateway.room.backend.RoomSnapshot;
 import plotina.gateway.command.CommandRejectedException;
-import plotina.gateway.command.RoomCommandService;
-import plotina.gateway.backend.QueueItemNotFoundException;
-import plotina.gateway.backend.InvalidQueuePositionException;
-import plotina.gateway.chat.ChatMessage;
+import plotina.gateway.room.RoomCommandService;
+import plotina.gateway.room.backend.QueueItemNotFoundException;
+import plotina.gateway.room.backend.InvalidQueuePositionException;
+import plotina.gateway.chat.backend.ChatMessage;
 import plotina.gateway.chat.ChatService;
 
 @Component
@@ -66,7 +66,8 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
         ? null
         : payload.get("commandId");
 
-    if (tokenNode == null
+    if (payload == null || !payload.isObject()
+        || tokenNode == null
         || !tokenNode.isTextual()
         || tokenNode.asText().isBlank()
         || commandIdNode == null
@@ -344,7 +345,7 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
 
   private RoomSnapshot seek(CommandContext command) {
     JsonNode position = command.payload().get("positionSeconds");
-    if (position == null || !position.isNumber()) {
+    if (position == null || !position.isNumber() || !Double.isFinite(position.doubleValue())) {
       throw new CommandRejectedException("INVALID_MESSAGE", "Position must be a number");
     }
     return roomCommandService.seek(

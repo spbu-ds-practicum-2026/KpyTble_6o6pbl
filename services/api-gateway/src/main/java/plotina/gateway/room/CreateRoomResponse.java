@@ -1,6 +1,6 @@
-package plotina.gateway.http;
+package plotina.gateway.room;
 
-import plotina.gateway.session.SessionInfo;
+import plotina.gateway.session.backend.SessionInfo;
 
 public record CreateRoomResponse(
     String roomId,

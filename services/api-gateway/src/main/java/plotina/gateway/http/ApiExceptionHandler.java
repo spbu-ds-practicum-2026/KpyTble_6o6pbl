@@ -5,7 +5,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
-import plotina.gateway.backend.RoomNotFoundException;
+import plotina.gateway.room.backend.RoomNotFoundException;
 
 @RestControllerAdvice
 public class ApiExceptionHandler {

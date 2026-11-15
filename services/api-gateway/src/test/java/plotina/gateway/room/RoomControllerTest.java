@@ -1,6 +1,14 @@
-package plotina.gateway.http;
+package plotina.gateway.room;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import plotina.gateway.room.backend.RoomBackend;
+import plotina.gateway.room.backend.RoomSnapshot;
+import plotina.gateway.room.backend.RoomNotFoundException;
+import plotina.gateway.room.RoomEntryService.RoomEntryResult;
+import plotina.gateway.session.backend.SessionInfo;
+import static org.mockito.Mockito.when;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -23,6 +31,21 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 @SpringBootTest
 @AutoConfigureMockMvc
 class RoomControllerTest {
+
+  @MockitoBean
+  private RoomBackend backend;
+
+  @BeforeEach
+  void setUpBackendResponses() {
+    RoomSnapshot state = new RoomSnapshot("room-1", 1L, true, 0.0);
+    when(backend.createRoom()).thenReturn(new RoomEntryResult(state,
+        new SessionInfo("host-token", "host", "room-1")));
+    when(backend.joinRoom("room-1")).thenReturn(new RoomEntryResult(state,
+        new SessionInfo("guest-token", "guest", "room-1")));
+    when(backend.getSnapshot("room-1")).thenReturn(state);
+    when(backend.getSnapshot("unknown")).thenThrow(new RoomNotFoundException("unknown"));
+    when(backend.joinRoom("unknown")).thenThrow(new RoomNotFoundException("unknown"));
+  }
 
   private final MockMvc mockMvc;
   private final ObjectMapper objectMapper;

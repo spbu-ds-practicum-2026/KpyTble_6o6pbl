@@ -1,10 +1,8 @@
-package plotina.gateway.session;
+package plotina.gateway.session.backend;
 
 import java.util.Optional;
 
 public interface SessionBackend {
-
-  SessionInfo createSession(String roomId);
 
   Optional<SessionInfo> findByToken(String sessionToken);
 }

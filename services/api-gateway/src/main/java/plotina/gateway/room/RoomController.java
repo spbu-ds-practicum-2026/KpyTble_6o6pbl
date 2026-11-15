@@ -1,4 +1,4 @@
-package plotina.gateway.http;
+package plotina.gateway.room;
 
 import java.net.URI;
 
@@ -9,8 +9,8 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-import plotina.gateway.backend.RoomBackend;
-import plotina.gateway.backend.RoomSnapshot;
+import plotina.gateway.room.backend.RoomBackend;
+import plotina.gateway.room.backend.RoomSnapshot;
 import plotina.gateway.room.RoomEntryService;
 
 @RestController

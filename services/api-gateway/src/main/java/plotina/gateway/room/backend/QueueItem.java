@@ -1,4 +1,4 @@
-package plotina.gateway.backend;
+package plotina.gateway.room.backend;
 
 public record QueueItem(
     String itemId,

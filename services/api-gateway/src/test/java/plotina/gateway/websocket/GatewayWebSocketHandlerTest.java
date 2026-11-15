@@ -11,14 +11,14 @@ import org.mockito.ArgumentCaptor;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 
-import plotina.gateway.session.SessionBackend;
-import plotina.gateway.session.SessionInfo;
-import plotina.gateway.backend.RoomBackend;
-import plotina.gateway.backend.RoomNotFoundException;
-import plotina.gateway.backend.RoomSnapshot;
-import plotina.gateway.command.RoomCommandService;
-import plotina.gateway.chat.ChatBackend;
-import plotina.gateway.chat.ChatMessage;
+import plotina.gateway.session.backend.SessionBackend;
+import plotina.gateway.session.backend.SessionInfo;
+import plotina.gateway.room.backend.RoomBackend;
+import plotina.gateway.room.backend.RoomNotFoundException;
+import plotina.gateway.room.backend.RoomSnapshot;
+import plotina.gateway.room.RoomCommandService;
+import plotina.gateway.chat.backend.ChatBackend;
+import plotina.gateway.chat.backend.ChatMessage;
 import plotina.gateway.chat.ChatService;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -57,9 +57,9 @@ class GatewayWebSocketHandlerTest {
         sessionBackend,
         new ConnectionRegistry(),
         new WebSocketSender(objectMapper),
-        new RoomCommandService(roomBackend, sessionBackend),
+        new RoomCommandService(roomBackend),
         broadcaster,
-        new ChatService(sessionBackend, chatBackend));
+        new ChatService(chatBackend));
   }
 
   @Test
@@ -120,7 +120,7 @@ class GatewayWebSocketHandlerTest {
   }
 
   @Test
-  void shouldRejectBlankChatMessage() throws Exception {
+  void shouldRejectNonStringChatMessage() throws Exception {
     authenticateSocket();
 
     handler.handleTextMessage(socket, new TextMessage("""
@@ -130,7 +130,7 @@ class GatewayWebSocketHandlerTest {
           "payload": {
             "sessionToken": "valid-token",
             "commandId": "chat-empty",
-            "text": "   "
+            "text": 123
           }
         }
         """));
@@ -145,15 +145,11 @@ class GatewayWebSocketHandlerTest {
   }
 
   @Test
-  void shouldRejectChatWithAnotherUsersToken() throws Exception {
+  void shouldRelayChatBackendPermissionError() throws Exception {
     authenticateSocket();
 
-    when(sessionBackend.findByToken("another-token"))
-        .thenReturn(Optional.of(
-            new SessionInfo(
-                "another-token",
-                "user-2",
-                "room-1")));
+    when(chatBackend.sendMessage("room-1", "user-1", "another-token", "chat-forbidden", "Привет!"))
+        .thenThrow(new plotina.gateway.command.CommandRejectedException("FORBIDDEN", "Rejected by chat backend"));
 
     handler.handleTextMessage(socket, new TextMessage("""
         {
@@ -173,7 +169,8 @@ class GatewayWebSocketHandlerTest {
         "FORBIDDEN",
         response.path("payload").path("code").asText());
 
-    verifyNoInteractions(chatBackend, broadcaster, roomBackend);
+    verify(chatBackend).sendMessage("room-1", "user-1", "another-token", "chat-forbidden", "Привет!");
+    verifyNoInteractions(broadcaster, roomBackend);
   }
 
   @Test
@@ -222,7 +219,7 @@ class GatewayWebSocketHandlerTest {
   }
 
   @Test
-  void shouldRejectNegativeSeekPosition() throws Exception {
+  void shouldRejectNonNumericSeekPosition() throws Exception {
     authenticateSocket();
 
     handler.handleTextMessage(socket, new TextMessage("""
@@ -232,7 +229,7 @@ class GatewayWebSocketHandlerTest {
           "payload": {
             "commandId": "command-invalid-seek",
             "sessionToken": "valid-token",
-            "positionSeconds": -10
+            "positionSeconds": "120"
           }
         }
         """));
@@ -416,15 +413,11 @@ class GatewayWebSocketHandlerTest {
   }
 
   @Test
-  void shouldRejectPauseWithAnotherUsersToken() throws Exception {
+  void shouldRelayRoomBackendPermissionError() throws Exception {
     authenticateSocket();
 
-    when(sessionBackend.findByToken("another-token"))
-        .thenReturn(Optional.of(
-            new SessionInfo(
-                "another-token",
-                "user-2",
-                "room-1")));
+    when(roomBackend.pause("room-1", "another-token", "command-forbidden"))
+        .thenThrow(new plotina.gateway.command.CommandRejectedException("FORBIDDEN", "Rejected by room backend"));
 
     handler.handleTextMessage(socket, new TextMessage("""
         {
@@ -444,7 +437,8 @@ class GatewayWebSocketHandlerTest {
         "FORBIDDEN",
         response.path("payload").path("code").asText());
 
-    verifyNoInteractions(roomBackend, broadcaster);
+    verify(roomBackend).pause("room-1", "another-token", "command-forbidden");
+    verifyNoInteractions(broadcaster);
   }
 
   @Test
@@ -536,6 +530,65 @@ class GatewayWebSocketHandlerTest {
     assertEquals(
         "UNAUTHORIZED",
         response.path("payload").path("code").asText());
+  }
+
+  @Test
+  void shouldForwardUrlWithoutCheckingProvider() throws Exception {
+    authenticateSocket();
+    clearInvocations(sessionBackend);
+    RoomSnapshot state = new RoomSnapshot("room-1", 9L, true, 0);
+    when(roomBackend.addVideo("room-1", "valid-token", "add-1", "not-a-url"))
+        .thenReturn(state);
+
+    handler.handleTextMessage(socket, new TextMessage("""
+        {"type":"queue.add","requestId":"r1","payload":{
+          "sessionToken":"valid-token","commandId":"add-1","url":"not-a-url"
+        }}
+        """));
+
+    assertEquals("command.ack", readSentMessage().path("type").asText());
+    verify(roomBackend).addVideo("room-1", "valid-token", "add-1", "not-a-url");
+    verifyNoInteractions(sessionBackend);
+  }
+
+  @Test
+  void shouldForwardNegativePositionForBackendDecision() throws Exception {
+    authenticateSocket();
+    when(roomBackend.seek("room-1", "valid-token", "seek-1", -10))
+        .thenThrow(new plotina.gateway.command.CommandRejectedException(
+            "INVALID_POSITION", "Backend rejected the position"));
+
+    handler.handleTextMessage(socket, new TextMessage("""
+        {"type":"playback.seek","requestId":"r1","payload":{
+          "sessionToken":"valid-token","commandId":"seek-1","positionSeconds":-10
+        }}
+        """));
+
+    assertEquals("INVALID_POSITION", readSentMessage().path("payload").path("code").asText());
+    verify(roomBackend).seek("room-1", "valid-token", "seek-1", -10);
+    verifyNoInteractions(broadcaster);
+  }
+
+  @Test
+  void shouldRejectFractionalQueueIndexBeforeBackend() throws Exception {
+    authenticateSocket();
+    handler.handleTextMessage(socket, new TextMessage("""
+        {"type":"queue.move","requestId":"r1","payload":{
+          "sessionToken":"valid-token","commandId":"move-1","itemId":"item-1","toIndex":1.5
+        }}
+        """));
+    assertEquals("INVALID_MESSAGE", readSentMessage().path("payload").path("code").asText());
+    verifyNoInteractions(roomBackend, broadcaster);
+  }
+
+  @Test
+  void shouldRejectNonObjectPayloadBeforeBackend() throws Exception {
+    authenticateSocket();
+    handler.handleTextMessage(socket, new TextMessage("""
+        {"type":"playback.pause","requestId":"r1","payload":[]}
+        """));
+    assertEquals("INVALID_MESSAGE", readSentMessage().path("payload").path("code").asText());
+    verifyNoInteractions(roomBackend, broadcaster);
   }
 
   private JsonNode readSentMessage() throws Exception {

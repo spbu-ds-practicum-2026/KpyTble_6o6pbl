@@ -1,12 +1,9 @@
-package plotina.gateway.chat.fake;
-
-import java.time.Instant;
-import java.util.UUID;
+package plotina.gateway.chat.backend.fake;
 
 import org.springframework.stereotype.Service;
 
-import plotina.gateway.chat.ChatBackend;
-import plotina.gateway.chat.ChatMessage;
+import plotina.gateway.chat.backend.ChatBackend;
+import plotina.gateway.chat.backend.ChatMessage;
 
 @Service
 public class FakeChatBackend implements ChatBackend {
@@ -19,10 +16,10 @@ public class FakeChatBackend implements ChatBackend {
       String commandId,
       String text) {
     return new ChatMessage(
-        UUID.randomUUID().toString(),
+        "demo-message",
         roomId,
         userId,
         text,
-        Instant.now().toString());
+        "2026-11-15T12:00:00Z");
   }
 }
