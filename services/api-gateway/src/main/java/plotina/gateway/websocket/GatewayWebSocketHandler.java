@@ -19,6 +19,8 @@ import plotina.gateway.command.CommandRejectedException;
 import plotina.gateway.command.RoomCommandService;
 import plotina.gateway.backend.QueueItemNotFoundException;
 import plotina.gateway.backend.InvalidQueuePositionException;
+import plotina.gateway.chat.ChatMessage;
+import plotina.gateway.chat.ChatService;
 
 @Component
 public class GatewayWebSocketHandler extends TextWebSocketHandler {
@@ -31,6 +33,7 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
   private final WebSocketSender sender;
   private final RoomBroadcaster broadcaster;
   private final RoomCommandService roomCommandService;
+  private final ChatService chatService;
 
   public GatewayWebSocketHandler(
       ObjectMapper objectMapper,
@@ -38,13 +41,15 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
       ConnectionRegistry connectionRegistry,
       WebSocketSender sender,
       RoomCommandService roomCommandService,
-      RoomBroadcaster broadcaster) {
+      RoomBroadcaster broadcaster,
+      ChatService chatService) {
     this.objectMapper = objectMapper;
     this.sessionBackend = sessionBackend;
     this.connectionRegistry = connectionRegistry;
     this.sender = sender;
     this.roomCommandService = roomCommandService;
     this.broadcaster = broadcaster;
+    this.chatService = chatService;
   }
 
   private void executeRoomCommand(
@@ -248,6 +253,8 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
       case "queue.remove" -> executeRoomCommand(session, request, this::removeVideo);
       case "queue.move" -> executeRoomCommand(session, request, this::moveVideo);
 
+      case "chat.send" -> sendChatMessage(session, request);
+
       default -> sendError(
           session,
           request.requestId(),
@@ -255,6 +262,74 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
           "Unsupported message type");
     }
 
+  }
+
+  private void sendChatMessage(
+      WebSocketSession socket,
+      ClientMessage request) throws Exception {
+    try {
+      JsonNode payload = request.payload();
+
+      if (payload == null || !payload.isObject()) {
+        throw new CommandRejectedException(
+            "INVALID_MESSAGE",
+            "Payload must be an object");
+      }
+
+      String token = requiredText(
+          payload,
+          "sessionToken",
+          "Session token must be a string");
+
+      String commandId = requiredText(
+          payload,
+          "commandId",
+          "Command ID must be a string");
+
+      String text = requiredText(
+          payload,
+          "text",
+          "Message text must be a string");
+
+      if (token.isBlank() || commandId.isBlank()) {
+        throw new CommandRejectedException(
+            "INVALID_MESSAGE",
+            "Session token and command ID must not be blank");
+      }
+
+      AuthenticatedSession identity = (AuthenticatedSession) socket.getAttributes()
+          .get(SESSION_ATTRIBUTE);
+
+      if (identity == null) {
+        throw new CommandRejectedException(
+            "UNAUTHORIZED",
+            "Authenticate the connection first");
+      }
+
+      ChatMessage message = chatService.sendMessage(
+          identity.userId(),
+          identity.roomId(),
+          token,
+          commandId,
+          text);
+
+      broadcaster.broadcast(
+          identity.roomId(),
+          new ServerMessage("chat.message", null, message));
+
+      send(
+          socket,
+          new ServerMessage(
+              "command.ack",
+              request.requestId(),
+              new ChatAck(commandId, message.messageId())));
+    } catch (CommandRejectedException exception) {
+      sendError(
+          socket,
+          request.requestId(),
+          exception.code(),
+          exception.getMessage());
+    }
   }
 
   private RoomSnapshot pause(CommandContext command) {
@@ -375,6 +450,11 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
   public record CommandAck(
       String commandId,
       long stateVersion) {
+  }
+
+  public record ChatAck(
+      String commandId,
+      String messageId) {
   }
 
 }

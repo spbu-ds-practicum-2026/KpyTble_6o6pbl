@@ -17,6 +17,9 @@ import plotina.gateway.backend.RoomBackend;
 import plotina.gateway.backend.RoomNotFoundException;
 import plotina.gateway.backend.RoomSnapshot;
 import plotina.gateway.command.RoomCommandService;
+import plotina.gateway.chat.ChatBackend;
+import plotina.gateway.chat.ChatMessage;
+import plotina.gateway.chat.ChatService;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
@@ -36,9 +39,11 @@ class GatewayWebSocketHandlerTest {
   private GatewayWebSocketHandler handler;
   private RoomBackend roomBackend;
   private RoomBroadcaster broadcaster;
+  private ChatBackend chatBackend;
 
   @BeforeEach
   void setUp() {
+    chatBackend = mock(ChatBackend.class);
     sessionBackend = mock(SessionBackend.class);
     socket = mock(WebSocketSession.class);
     roomBackend = mock(RoomBackend.class);
@@ -53,7 +58,122 @@ class GatewayWebSocketHandlerTest {
         new ConnectionRegistry(),
         new WebSocketSender(objectMapper),
         new RoomCommandService(roomBackend, sessionBackend),
-        broadcaster);
+        broadcaster,
+        new ChatService(sessionBackend, chatBackend));
+  }
+
+  @Test
+  void shouldSendChatMessageAndBroadcastIt() throws Exception {
+    authenticateSocket();
+
+    ChatMessage message = new ChatMessage(
+        "message-1",
+        "room-1",
+        "user-1",
+        "Привет!",
+        "2026-11-15T12:00:00Z");
+
+    when(chatBackend.sendMessage(
+        "room-1",
+        "user-1",
+        "valid-token",
+        "chat-1",
+        "Привет!")).thenReturn(message);
+
+    handler.handleTextMessage(socket, new TextMessage("""
+        {
+          "type": "chat.send",
+          "requestId": "request-chat",
+          "payload": {
+            "sessionToken": "valid-token",
+            "commandId": "chat-1",
+            "text": "Привет!"
+          }
+        }
+        """));
+
+    JsonNode response = readSentMessage();
+
+    assertEquals("command.ack", response.path("type").asText());
+    assertEquals(
+        "request-chat",
+        response.path("requestId").asText());
+    assertEquals(
+        "chat-1",
+        response.path("payload").path("commandId").asText());
+    assertEquals(
+        "message-1",
+        response.path("payload").path("messageId").asText());
+
+    verify(chatBackend).sendMessage(
+        "room-1",
+        "user-1",
+        "valid-token",
+        "chat-1",
+        "Привет!");
+
+    verify(broadcaster).broadcast(
+        "room-1",
+        new ServerMessage("chat.message", null, message));
+
+    verifyNoInteractions(roomBackend);
+  }
+
+  @Test
+  void shouldRejectBlankChatMessage() throws Exception {
+    authenticateSocket();
+
+    handler.handleTextMessage(socket, new TextMessage("""
+        {
+          "type": "chat.send",
+          "requestId": "request-empty",
+          "payload": {
+            "sessionToken": "valid-token",
+            "commandId": "chat-empty",
+            "text": "   "
+          }
+        }
+        """));
+
+    JsonNode response = readSentMessage();
+
+    assertEquals(
+        "INVALID_MESSAGE",
+        response.path("payload").path("code").asText());
+
+    verifyNoInteractions(chatBackend, broadcaster, roomBackend);
+  }
+
+  @Test
+  void shouldRejectChatWithAnotherUsersToken() throws Exception {
+    authenticateSocket();
+
+    when(sessionBackend.findByToken("another-token"))
+        .thenReturn(Optional.of(
+            new SessionInfo(
+                "another-token",
+                "user-2",
+                "room-1")));
+
+    handler.handleTextMessage(socket, new TextMessage("""
+        {
+          "type": "chat.send",
+          "requestId": "request-forbidden-chat",
+          "payload": {
+            "sessionToken": "another-token",
+            "commandId": "chat-forbidden",
+            "text": "Привет!"
+          }
+        }
+        """));
+
+    JsonNode response = readSentMessage();
+
+    assertEquals(
+        "FORBIDDEN",
+        response.path("payload").path("code").asText());
+
+    verifyNoInteractions(chatBackend, broadcaster, roomBackend);
   }
 
   @Test
