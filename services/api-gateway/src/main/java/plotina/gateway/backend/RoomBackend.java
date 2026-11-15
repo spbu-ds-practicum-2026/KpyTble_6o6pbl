@@ -22,4 +22,28 @@ public interface RoomBackend {
       String commandId,
       double positionSeconds);
 
+  RoomSnapshot addVideo(
+      String roomId,
+      String sessionToken,
+      String commandId,
+      String url);
+
+  RoomSnapshot removeVideo(
+      String roomId,
+      String sessionToken,
+      String commandId,
+      String itemId);
+
+  RoomSnapshot moveVideo(
+      String roomId,
+      String sessionToken,
+      String commandId,
+      String itemId,
+      int toIndex);
+
+  RoomSnapshot next(
+      String roomId,
+      String sessionToken,
+      String commandId);
+
 }

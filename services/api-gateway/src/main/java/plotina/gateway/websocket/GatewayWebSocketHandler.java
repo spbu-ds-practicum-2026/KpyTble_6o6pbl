@@ -17,6 +17,8 @@ import plotina.gateway.backend.RoomNotFoundException;
 import plotina.gateway.backend.RoomSnapshot;
 import plotina.gateway.command.CommandRejectedException;
 import plotina.gateway.command.RoomCommandService;
+import plotina.gateway.backend.QueueItemNotFoundException;
+import plotina.gateway.backend.InvalidQueuePositionException;
 
 @Component
 public class GatewayWebSocketHandler extends TextWebSocketHandler {
@@ -45,9 +47,10 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
     this.broadcaster = broadcaster;
   }
 
-  private void handlePlaybackCommand(
+  private void executeRoomCommand(
       WebSocketSession socket,
-      ClientMessage request) throws Exception {
+      ClientMessage request,
+      RoomCommand action) throws Exception {
     JsonNode payload = request.payload();
 
     JsonNode tokenNode = payload == null
@@ -86,32 +89,9 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
     RoomSnapshot state;
 
     try {
-      if (request.type().equals("playback.seek")) {
-        JsonNode positionNode = payload.get("positionSeconds");
-
-        if (positionNode == null || !positionNode.isNumber()) {
-          sendError(
-              socket,
-              request.requestId(),
-              "INVALID_MESSAGE",
-              "Position must be a number");
-          return;
-        }
-
-        state = roomCommandService.seek(
-            identity.userId(),
-            identity.roomId(),
-            tokenNode.asText(),
-            commandIdNode.asText(),
-            positionNode.doubleValue());
-      } else {
-        state = roomCommandService.executePlayback(
-            request.type(),
-            identity.userId(),
-            identity.roomId(),
-            tokenNode.asText(),
-            commandIdNode.asText());
-      }
+      state = action.execute(new CommandContext(
+          identity.userId(), identity.roomId(),
+          tokenNode.asText(), commandIdNode.asText(), payload));
     } catch (CommandRejectedException exception) {
       sendError(
           socket,
@@ -260,8 +240,13 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
 
       case "session.authenticate" -> authenticate(session, request);
 
-      case "playback.pause", "playback.play", "playback.seek" ->
-        handlePlaybackCommand(session, request);
+      case "playback.pause" -> executeRoomCommand(session, request, this::pause);
+      case "playback.play" -> executeRoomCommand(session, request, this::play);
+      case "playback.seek" -> executeRoomCommand(session, request, this::seek);
+      case "playback.next" -> executeRoomCommand(session, request, this::next);
+      case "queue.add" -> executeRoomCommand(session, request, this::addVideo);
+      case "queue.remove" -> executeRoomCommand(session, request, this::removeVideo);
+      case "queue.move" -> executeRoomCommand(session, request, this::moveVideo);
 
       default -> sendError(
           session,
@@ -270,6 +255,91 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
           "Unsupported message type");
     }
 
+  }
+
+  private RoomSnapshot pause(CommandContext command) {
+    return roomCommandService.pause(
+        command.userId(), command.roomId(), command.token(), command.commandId());
+  }
+
+  private RoomSnapshot play(CommandContext command) {
+    return roomCommandService.play(
+        command.userId(), command.roomId(), command.token(), command.commandId());
+  }
+
+  private RoomSnapshot seek(CommandContext command) {
+    JsonNode position = command.payload().get("positionSeconds");
+    if (position == null || !position.isNumber()) {
+      throw new CommandRejectedException("INVALID_MESSAGE", "Position must be a number");
+    }
+    return roomCommandService.seek(
+        command.userId(), command.roomId(), command.token(), command.commandId(),
+        position.doubleValue());
+  }
+
+  private RoomSnapshot next(CommandContext command) {
+    try {
+      return roomCommandService.next(
+          command.userId(), command.roomId(), command.token(), command.commandId());
+    } catch (QueueItemNotFoundException exception) {
+      throw new CommandRejectedException("QUEUE_ITEM_NOT_FOUND", exception.getMessage());
+    }
+  }
+
+  private RoomSnapshot addVideo(CommandContext command) {
+    String url = requiredText(command.payload(), "url", "Video URL must be a string");
+    return roomCommandService.addVideo(
+        command.userId(), command.roomId(), command.token(), command.commandId(), url);
+  }
+
+  private RoomSnapshot removeVideo(CommandContext command) {
+    String itemId = requiredText(command.payload(), "itemId", "Queue item ID must be a string");
+    try {
+      return roomCommandService.removeVideo(
+          command.userId(), command.roomId(), command.token(), command.commandId(), itemId);
+    } catch (QueueItemNotFoundException exception) {
+      throw new CommandRejectedException("QUEUE_ITEM_NOT_FOUND", exception.getMessage());
+    }
+  }
+
+  private RoomSnapshot moveVideo(CommandContext command) {
+    JsonNode itemId = command.payload().get("itemId");
+    JsonNode index = command.payload().get("toIndex");
+    if (itemId == null || !itemId.isTextual()
+        || index == null || !index.isIntegralNumber() || !index.canConvertToInt()) {
+      throw new CommandRejectedException(
+          "INVALID_MESSAGE", "Item ID must be a string and position must be an integer");
+    }
+    try {
+      return roomCommandService.moveVideo(
+          command.userId(), command.roomId(), command.token(), command.commandId(),
+          itemId.asText(), index.intValue());
+    } catch (QueueItemNotFoundException exception) {
+      throw new CommandRejectedException("QUEUE_ITEM_NOT_FOUND", exception.getMessage());
+    } catch (InvalidQueuePositionException exception) {
+      throw new CommandRejectedException("INVALID_QUEUE_POSITION", exception.getMessage());
+    }
+  }
+
+  private String requiredText(JsonNode payload, String field, String message) {
+    JsonNode value = payload.get(field);
+    if (value == null || !value.isTextual()) {
+      throw new CommandRejectedException("INVALID_MESSAGE", message);
+    }
+    return value.asText();
+  }
+
+  @FunctionalInterface
+  private interface RoomCommand {
+    RoomSnapshot execute(CommandContext command);
+  }
+
+  private record CommandContext(
+      String userId,
+      String roomId,
+      String token,
+      String commandId,
+      JsonNode payload) {
   }
 
   private void send(
