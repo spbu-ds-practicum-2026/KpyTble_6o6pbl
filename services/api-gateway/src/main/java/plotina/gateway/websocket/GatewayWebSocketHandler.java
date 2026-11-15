@@ -16,6 +16,8 @@ import plotina.gateway.session.SessionInfo;
 import plotina.gateway.backend.RoomBackend;
 import plotina.gateway.backend.RoomNotFoundException;
 import plotina.gateway.backend.RoomSnapshot;
+import plotina.gateway.command.CommandRejectedException;
+import plotina.gateway.command.RoomCommandService;
 
 @Component
 public class GatewayWebSocketHandler extends TextWebSocketHandler {
@@ -26,21 +28,21 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
   private final SessionBackend sessionBackend;
   private final ConnectionRegistry connectionRegistry;
   private final WebSocketSender sender;
-  private final RoomBackend roomBackend;
   private final RoomBroadcaster broadcaster;
+  private final RoomCommandService roomCommandService;
 
   public GatewayWebSocketHandler(
       ObjectMapper objectMapper,
       SessionBackend sessionBackend,
       ConnectionRegistry connectionRegistry,
       WebSocketSender sender,
-      RoomBackend roomBackend,
+      RoomCommandService roomCommandService,
       RoomBroadcaster broadcaster) {
     this.objectMapper = objectMapper;
     this.sessionBackend = sessionBackend;
     this.connectionRegistry = connectionRegistry;
     this.sender = sender;
-    this.roomBackend = roomBackend;
+    this.roomCommandService = roomCommandService;
     this.broadcaster = broadcaster;
   }
 
@@ -70,40 +72,33 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
           "Session token and command ID must be non-empty strings");
       return;
     }
-
-    AuthenticatedSession connectionIdentity = (AuthenticatedSession) socket.getAttributes()
+    AuthenticatedSession identity = (AuthenticatedSession) socket.getAttributes()
         .get(SESSION_ATTRIBUTE);
 
-    SessionInfo commandIdentity = sessionBackend
-        .findByToken(tokenNode.asText())
-        .orElse(null);
-
-    if (connectionIdentity == null || commandIdentity == null) {
+    if (identity == null) {
       sendError(
           socket,
           request.requestId(),
           "UNAUTHORIZED",
-          "Valid session is required");
-      return;
-    }
-
-    if (!connectionIdentity.userId().equals(commandIdentity.userId())
-        || !connectionIdentity.roomId().equals(commandIdentity.roomId())) {
-      sendError(
-          socket,
-          request.requestId(),
-          "FORBIDDEN",
-          "Command session does not match the connection");
+          "Authenticate the connection first");
       return;
     }
 
     RoomSnapshot state;
 
     try {
-      state = roomBackend.pause(
-          connectionIdentity.roomId(),
+      state = roomCommandService.pause(
+          identity.userId(),
+          identity.roomId(),
           tokenNode.asText(),
           commandIdNode.asText());
+    } catch (CommandRejectedException exception) {
+      sendError(
+          socket,
+          request.requestId(),
+          exception.code(),
+          exception.getMessage());
+      return;
     } catch (RoomNotFoundException exception) {
       sendError(
           socket,

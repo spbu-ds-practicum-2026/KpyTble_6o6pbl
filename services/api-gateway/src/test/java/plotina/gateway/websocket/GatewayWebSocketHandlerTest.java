@@ -16,6 +16,7 @@ import plotina.gateway.session.SessionInfo;
 import plotina.gateway.backend.RoomBackend;
 import plotina.gateway.backend.RoomNotFoundException;
 import plotina.gateway.backend.RoomSnapshot;
+import plotina.gateway.command.RoomCommandService;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
@@ -52,7 +53,7 @@ class GatewayWebSocketHandlerTest {
         sessionBackend,
         new ConnectionRegistry(),
         new WebSocketSender(objectMapper),
-        roomBackend,
+        new RoomCommandService(roomBackend, sessionBackend),
         broadcaster);
   }
 
