@@ -6,8 +6,6 @@ import (
 	"plotina/chat-service/internal/chat"
 )
 
-// FakeMembershipChecker is for local development and tests only.
-// It accepts only explicitly configured tokens and does not contact Room Service.
 type FakeMembershipChecker struct {
 	sessions map[string]chat.Membership
 }
