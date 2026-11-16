@@ -1,0 +1,332 @@
+:root {
+  font-family:
+    Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  color: #172033;
+  background: #f2f5fa;
+  font-synthesis: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+a {
+  color: #315bd6;
+}
+
+.landing {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.landing-card {
+  width: min(100%, 480px);
+  padding: 32px;
+  border-radius: 16px;
+  background: white;
+  box-shadow: 0 16px 50px rgb(20 35 70 / 10%);
+}
+
+.landing-card h1 {
+  margin-top: 0;
+  font-size: 42px;
+}
+
+.landing-card form {
+  display: grid;
+  gap: 12px;
+}
+
+.landing-card > .button {
+  width: 100%;
+  margin-top: 12px;
+}
+
+input,
+textarea {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #ccd4e0;
+  border-radius: 8px;
+  background: white;
+}
+
+textarea {
+  min-height: 90px;
+  resize: vertical;
+}
+
+.separator {
+  margin: 20px 0;
+  text-align: center;
+  color: #778196;
+}
+
+.page {
+  width: min(1500px, 100%);
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.room-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+.room-header h1 {
+  margin: 0;
+}
+
+.header-actions,
+.controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.room-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr);
+  gap: 20px;
+}
+
+.main-column,
+.side-column {
+  display: grid;
+  align-content: start;
+  gap: 20px;
+}
+
+.panel {
+  padding: 20px;
+  border-radius: 12px;
+  background: white;
+  box-shadow: 0 4px 20px rgb(31 45 80 / 7%);
+}
+
+.panel h2 {
+  margin-top: 0;
+}
+
+.player {
+  position: relative;
+  overflow: hidden;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 12px;
+  background: #111827;
+}
+
+.player iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.player--empty {
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  color: white;
+  text-align: center;
+}
+
+.player-state {
+  margin-bottom: 4px;
+}
+
+.inline-form {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+  margin: 16px 0;
+}
+
+.inline-form label {
+  white-space: nowrap;
+}
+
+.button {
+  padding: 10px 16px;
+  border: 0;
+  border-radius: 8px;
+  color: white;
+  background: #315bd6;
+}
+
+.button--large {
+  padding: 13px 20px;
+}
+
+.button--secondary {
+  color: #27344f;
+  background: #e7ebf3;
+}
+
+.button--danger {
+  background: #be3544;
+}
+
+.error {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 12px 0;
+  padding: 12px 16px;
+  border: 1px solid #e4a1a8;
+  border-radius: 8px;
+  color: #79232d;
+  background: #fff0f2;
+}
+
+.error p {
+  margin: 4px 0 0;
+}
+
+.error button {
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font-size: 20px;
+}
+
+.connection {
+  padding: 7px 10px;
+  border-radius: 999px;
+  background: #e7ebf3;
+}
+
+.connection--connected {
+  color: #176139;
+  background: #dff5e8;
+}
+
+.connection--reconnecting,
+.connection--connecting,
+.connection--authenticating {
+  color: #765a12;
+  background: #fff3ce;
+}
+
+.connection--disconnected {
+  color: #79232d;
+  background: #ffe1e5;
+}
+
+.queue,
+.participants {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.queue__item,
+.participants li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid #e7ebf3;
+}
+
+.queue__item--current {
+  font-weight: 700;
+}
+
+.queue__item button {
+  margin-left: 4px;
+}
+
+.chat-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.messages {
+  min-height: 240px;
+  max-height: 520px;
+  overflow-y: auto;
+}
+
+.message {
+  padding: 10px 0;
+  border-bottom: 1px solid #e7ebf3;
+}
+
+.message header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.message time,
+.hint {
+  color: #778196;
+}
+
+.message p {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.chat-form {
+  display: grid;
+  gap: 8px;
+}
+
+@media (max-width: 900px) {
+  .room-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .room-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+@media (max-width: 600px) {
+  .page {
+    padding: 12px;
+  }
+
+  .inline-form {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .header-actions {
+    align-items: stretch;
+    flex-direction: column;
+    width: 100%;
+  }
+}
