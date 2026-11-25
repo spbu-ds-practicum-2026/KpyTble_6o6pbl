@@ -18,7 +18,7 @@ public class WebSocketSender {
 
   public void send(
       WebSocketSession socket,
-      ServerMessage message) throws IOException {
+      Object message) throws IOException {
     String json = objectMapper.writeValueAsString(message);
 
     synchronized (socket) {

@@ -1,602 +1,135 @@
 package plotina.gateway.websocket;
 
-import java.util.HashMap;
-import java.util.Optional;
-
-import com.fasterxml.jackson.databind.JsonNode;
+import java.io.IOException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
-import org.springframework.web.socket.TextMessage;
-import org.springframework.web.socket.WebSocketSession;
-
-import plotina.gateway.session.backend.SessionBackend;
-import plotina.gateway.session.backend.SessionInfo;
-import plotina.gateway.room.backend.RoomBackend;
-import plotina.gateway.room.backend.RoomNotFoundException;
-import plotina.gateway.room.backend.RoomSnapshot;
-import plotina.gateway.room.RoomCommandService;
-import plotina.gateway.chat.backend.ChatBackend;
-import plotina.gateway.chat.backend.ChatMessage;
-import plotina.gateway.chat.ChatService;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-import static org.mockito.Mockito.clearInvocations;
-import static org.mockito.Mockito.verifyNoInteractions;
+import org.springframework.web.socket.*;
+import plotina.gateway.http.ServiceClient;
+import plotina.gateway.http.GatewayException;
+import plotina.gateway.session.SessionDirectory;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
 class GatewayWebSocketHandlerTest {
+  final ObjectMapper mapper = new ObjectMapper();
+  final ServiceClient services = mock(ServiceClient.class);
+  final SessionDirectory sessions = new SessionDirectory();
+  final ConnectionRegistry registry = new ConnectionRegistry();
+  final WebSocketSender sender = new WebSocketSender(mapper);
+  final RoomBroadcaster broadcaster = new RoomBroadcaster(registry, sender);
+  final GatewayWebSocketHandler handler = new GatewayWebSocketHandler(
+      mapper, services, sessions, registry, sender, broadcaster, 10000);
+  WebSocketSession socket;
 
-  private final ObjectMapper objectMapper = new ObjectMapper();
-
-  private SessionBackend sessionBackend;
-  private WebSocketSession socket;
-  private GatewayWebSocketHandler handler;
-  private RoomBackend roomBackend;
-  private RoomBroadcaster broadcaster;
-  private ChatBackend chatBackend;
-
-  @BeforeEach
-  void setUp() {
-    chatBackend = mock(ChatBackend.class);
-    sessionBackend = mock(SessionBackend.class);
-    socket = mock(WebSocketSession.class);
-    roomBackend = mock(RoomBackend.class);
-    broadcaster = mock(RoomBroadcaster.class);
-
-    when(socket.getAttributes()).thenReturn(new HashMap<>());
-    when(socket.getId()).thenReturn("socket-1");
-
-    handler = new GatewayWebSocketHandler(
-        objectMapper,
-        sessionBackend,
-        new ConnectionRegistry(),
-        new WebSocketSender(objectMapper),
-        new RoomCommandService(roomBackend),
-        broadcaster,
-        new ChatService(chatBackend));
+  @BeforeEach void setup() {
+    socket = socket("one");
+    handler.afterConnectionEstablished(socket);
   }
 
-  @Test
-  void shouldSendChatMessageAndBroadcastIt() throws Exception {
-    authenticateSocket();
-
-    ChatMessage message = new ChatMessage(
-        "message-1",
-        "room-1",
-        "user-1",
-        "Привет!",
-        "2026-11-15T12:00:00Z");
-
-    when(chatBackend.sendMessage(
-        "room-1",
-        "user-1",
-        "valid-token",
-        "chat-1",
-        "Привет!")).thenReturn(message);
-
-    handler.handleTextMessage(socket, new TextMessage("""
-        {
-          "type": "chat.send",
-          "requestId": "request-chat",
-          "payload": {
-            "sessionToken": "valid-token",
-            "commandId": "chat-1",
-            "text": "Привет!"
-          }
-        }
-        """));
-
-    JsonNode response = readSentMessage();
-
-    assertEquals("command.ack", response.path("type").asText());
-    assertEquals(
-        "request-chat",
-        response.path("requestId").asText());
-    assertEquals(
-        "chat-1",
-        response.path("payload").path("commandId").asText());
-    assertEquals(
-        "message-1",
-        response.path("payload").path("messageId").asText());
-
-    verify(chatBackend).sendMessage(
-        "room-1",
-        "user-1",
-        "valid-token",
-        "chat-1",
-        "Привет!");
-
-    verify(broadcaster).broadcast(
-        "room-1",
-        new ServerMessage("chat.message", null, message));
-
-    verifyNoInteractions(roomBackend);
+  WebSocketSession socket(String id) {
+    WebSocketSession result = mock(WebSocketSession.class);
+    when(result.getId()).thenReturn(id);
+    when(result.isOpen()).thenReturn(true);
+    return result;
   }
 
-  @Test
-  void shouldRejectNonStringChatMessage() throws Exception {
-    authenticateSocket();
-
-    handler.handleTextMessage(socket, new TextMessage("""
-        {
-          "type": "chat.send",
-          "requestId": "request-empty",
-          "payload": {
-            "sessionToken": "valid-token",
-            "commandId": "chat-empty",
-            "text": 123
-          }
-        }
-        """));
-
-    JsonNode response = readSentMessage();
-
-    assertEquals(
-        "INVALID_MESSAGE",
-        response.path("payload").path("code").asText());
-
-    verifyNoInteractions(chatBackend, broadcaster, roomBackend);
+  @Test void matchingPongAcknowledgesPig() throws Exception {
+    handler.heartbeat();
+    var capture = ArgumentCaptor.forClass(TextMessage.class);
+    verify(socket).sendMessage(capture.capture());
+    var pig = mapper.readTree(capture.getValue().getPayload());
+    assertEquals("pig", pig.path("type").asText());
+    handler.handleTextMessage(socket, new TextMessage("{\"type\":\"pong\",\"pigId\":\"wrong\"}"));
+    assertNotNull(registry.get("one").pigId);
+    handler.handleTextMessage(socket, new TextMessage("{\"type\":\"pong\",\"pigId\":\"" + pig.path("pigId").asText() + "\"}"));
+    assertNull(registry.get("one").pigId);
+    verifyNoInteractions(services);
   }
 
-  @Test
-  void shouldRelayChatBackendPermissionError() throws Exception {
-    authenticateSocket();
-
-    when(chatBackend.sendMessage("room-1", "user-1", "another-token", "chat-forbidden", "Привет!"))
-        .thenThrow(new plotina.gateway.command.CommandRejectedException("FORBIDDEN", "Rejected by chat backend"));
-
-    handler.handleTextMessage(socket, new TextMessage("""
-        {
-          "type": "chat.send",
-          "requestId": "request-forbidden-chat",
-          "payload": {
-            "sessionToken": "another-token",
-            "commandId": "chat-forbidden",
-            "text": "Привет!"
-          }
-        }
-        """));
-
-    JsonNode response = readSentMessage();
-
-    assertEquals(
-        "FORBIDDEN",
-        response.path("payload").path("code").asText());
-
-    verify(chatBackend).sendMessage("room-1", "user-1", "another-token", "chat-forbidden", "Привет!");
-    verifyNoInteractions(broadcaster, roomBackend);
+  @Test void expiredPigClosesAndRemovesConnection() throws Exception {
+    var connection = registry.get("one");
+    connection.pigId = "expired";
+    connection.pigSentAt = 0;
+    handler.heartbeat();
+    verify(socket).close(CloseStatus.SESSION_NOT_RELIABLE);
+    assertNull(registry.get("one"));
   }
 
-  @Test
-  void shouldSeekRoomAndBroadcastState() throws Exception {
-    authenticateSocket();
-
-    RoomSnapshot state = new RoomSnapshot(
-        "room-1",
-        2L,
-        true,
-        120.5);
-
-    when(roomBackend.seek(
-        "room-1",
-        "valid-token",
-        "command-seek",
-        120.5)).thenReturn(state);
-
-    handler.handleTextMessage(socket, new TextMessage("""
-        {
-          "type": "playback.seek",
-          "requestId": "request-seek",
-          "payload": {
-            "commandId": "command-seek",
-            "sessionToken": "valid-token",
-            "positionSeconds": 120.5
-          }
-        }
-        """));
-
-    JsonNode response = readSentMessage();
-
-    assertEquals(
-        "command.ack",
-        response.path("type").asText());
-
-    verify(roomBackend).seek(
-        "room-1",
-        "valid-token",
-        "command-seek",
-        120.5);
-
-    verify(broadcaster).broadcast(
-        "room-1",
-        new ServerMessage("room.state", null, state));
+  @Test void broadcastIsRoomScopedAndContinuesAfterSendFailure() throws Exception {
+    var first = registry.get("one");
+    first.roomId = "a";
+    first.ready = true;
+    var secondSocket = socket("two");
+    registry.register(secondSocket);
+    var second = registry.get("two");
+    second.roomId = "a";
+    second.ready = true;
+    var otherSocket = socket("other");
+    registry.register(otherSocket);
+    registry.get("other").roomId = "b";
+    registry.get("other").ready = true;
+    doThrow(new IOException("test")).when(socket).sendMessage(any());
+    broadcaster.broadcast("a", mapper.readTree("{\"type\":\"sendState\",\"state\":{}}"));
+    verify(secondSocket).sendMessage(any());
+    verify(otherSocket, never()).sendMessage(any());
+    verify(socket).close(CloseStatus.SERVER_ERROR);
+    assertNull(registry.get("one"));
   }
 
-  @Test
-  void shouldRejectNonNumericSeekPosition() throws Exception {
-    authenticateSocket();
-
-    handler.handleTextMessage(socket, new TextMessage("""
-        {
-          "type": "playback.seek",
-          "requestId": "request-invalid-seek",
-          "payload": {
-            "commandId": "command-invalid-seek",
-            "sessionToken": "valid-token",
-            "positionSeconds": "120"
-          }
-        }
-        """));
-
-    JsonNode response = readSentMessage();
-
-    assertEquals(
-        "INVALID_MESSAGE",
-        response.path("payload").path("code").asText());
-
-    verifyNoInteractions(roomBackend, broadcaster);
+  @Test void buffersDuringInitializationAndDoesNotLeakChatBeforeBaseline() throws Exception {
+    var connection = registry.get("one");
+    connection.roomId = "a";
+    var old = mapper.readTree("{\"type\":\"sendMessage\",\"message\":{\"messageSeq\":42}}");
+    broadcaster.broadcast("a", old);
+    assertEquals(1, connection.pending.size());
+    verify(socket, never()).sendMessage(any());
+    connection.initialSeq = 42;
+    connection.ready = true;
+    broadcaster.broadcast("a", old);
+    verify(socket, never()).sendMessage(any());
+    broadcaster.broadcast("a", mapper.readTree("{\"type\":\"sendMessage\",\"message\":{\"messageSeq\":43}}"));
+    verify(socket).sendMessage(any());
   }
 
-  private void authenticateSocket() throws Exception {
-    when(sessionBackend.findByToken("valid-token"))
-        .thenReturn(Optional.of(
-            new SessionInfo(
-                "valid-token",
-                "user-1",
-                "room-1")));
-
-    handler.handleTextMessage(socket, new TextMessage("""
-        {
-          "type": "session.authenticate",
-          "requestId": "auth-setup",
-          "payload": {
-            "sessionToken": "valid-token"
-          }
-        }
-        """));
-
-    clearInvocations(socket);
+  @Test void verifiesTokenWithRoomBeforeDeliveringInitialState() throws Exception {
+    sessions.remember("invalid", "room-1");
+    when(services.room("GET", "/rooms/room-1", "invalid", null))
+        .thenThrow(new GatewayException(401, "unauthorized", "Invalid token"));
+    handler.handleTextMessage(socket, new TextMessage("{\"type\":\"getState\",\"token\":\"invalid\",\"payload\":{}}"));
+    var capture = ArgumentCaptor.forClass(TextMessage.class);
+    verify(socket).sendMessage(capture.capture());
+    assertEquals("unauthorized", mapper.readTree(capture.getValue().getPayload()).path("error").path("code").asText());
+    assertNull(registry.get("one").roomId);
+    verify(services, never()).chat(any(), any(), any(), any());
   }
 
-  @Test
-  void shouldPauseRoomAndBroadcastState() throws Exception {
-    authenticateSocket();
-
-    RoomSnapshot state = new RoomSnapshot(
-        "room-1",
-        2L,
-        true,
-        12.5);
-
-    when(roomBackend.pause(
-        "room-1",
-        "valid-token",
-        "command-1")).thenReturn(state);
-
-    handler.handleTextMessage(socket, new TextMessage("""
-        {
-          "type": "playback.pause",
-          "requestId": "request-1",
-          "payload": {
-            "commandId": "command-1",
-            "sessionToken": "valid-token"
-          }
-        }
-        """));
-
-    JsonNode response = readSentMessage();
-
-    assertEquals(
-        "command.ack",
-        response.path("type").asText());
-    assertEquals(
-        "request-1",
-        response.path("requestId").asText());
-    assertEquals(
-        "command-1",
-        response.path("payload").path("commandId").asText());
-    assertEquals(
-        2L,
-        response.path("payload").path("stateVersion").asLong());
-
-    verify(roomBackend).pause(
-        "room-1",
-        "valid-token",
-        "command-1");
-
-    verify(broadcaster).broadcast(
-        "room-1",
-        new ServerMessage("room.state", null, state));
+  @Test void stateRefreshWorksWithoutChatService() throws Exception {
+    var connection = registry.get("one");
+    connection.roomId = "room-1";
+    connection.token = "token";
+    connection.ready = true;
+    when(services.room("GET", "/rooms/room-1", "token", null)).thenReturn(mapper.readTree("{\"state_version\":9}"));
+    handler.reconcile();
+    verify(socket).sendMessage(any());
+    verify(services, never()).chat(any(), any(), any(), any());
   }
 
-  @Test
-  void shouldPlayRoomAndBroadcastState() throws Exception {
-    authenticateSocket();
-
-    RoomSnapshot state = new RoomSnapshot(
-        "room-1",
-        2L,
-        false,
-        12.5);
-
-    when(roomBackend.play(
-        "room-1",
-        "valid-token",
-        "command-play")).thenReturn(state);
-
-    handler.handleTextMessage(socket, new TextMessage("""
-        {
-          "type": "playback.play",
-          "requestId": "request-play",
-          "payload": {
-            "commandId": "command-play",
-            "sessionToken": "valid-token"
-          }
-        }
-        """));
-
-    JsonNode response = readSentMessage();
-
-    assertEquals(
-        "command.ack",
-        response.path("type").asText());
-    assertEquals(
-        "request-play",
-        response.path("requestId").asText());
-    assertEquals(
-        "command-play",
-        response.path("payload").path("commandId").asText());
-    assertEquals(
-        2L,
-        response.path("payload").path("stateVersion").asLong());
-
-    verify(roomBackend).play(
-        "room-1",
-        "valid-token",
-        "command-play");
-
-    verify(broadcaster).broadcast(
-        "room-1",
-        new ServerMessage("room.state", null, state));
-  }
-
-  @Test
-  void shouldAuthenticateWithValidToken() throws Exception {
-    when(sessionBackend.findByToken("valid-token"))
-        .thenReturn(Optional.of(
-            new SessionInfo(
-                "valid-token",
-                "user-1",
-                "room-1")));
-
-    handler.handleTextMessage(socket, new TextMessage("""
-        {
-          "type": "session.authenticate",
-          "requestId": "auth-1",
-          "payload": {
-            "sessionToken": "valid-token"
-          }
-        }
-        """));
-
-    JsonNode response = readSentMessage();
-
-    assertEquals(
-        "session.authenticated",
-        response.path("type").asText());
-    assertEquals(
-        "auth-1",
-        response.path("requestId").asText());
-    assertEquals(
-        "user-1",
-        response.path("payload").path("userId").asText());
-    assertEquals(
-        "room-1",
-        response.path("payload").path("roomId").asText());
-
-    GatewayWebSocketHandler.AuthenticatedSession identity = socket.getAttributes().values().stream()
-        .filter(
-            GatewayWebSocketHandler.AuthenticatedSession.class::isInstance)
-        .map(
-            GatewayWebSocketHandler.AuthenticatedSession.class::cast)
-        .findFirst()
-        .orElseThrow();
-
-    assertEquals("user-1", identity.userId());
-    assertEquals("room-1", identity.roomId());
-  }
-
-  @Test
-  void shouldRelayRoomBackendPermissionError() throws Exception {
-    authenticateSocket();
-
-    when(roomBackend.pause("room-1", "another-token", "command-forbidden"))
-        .thenThrow(new plotina.gateway.command.CommandRejectedException("FORBIDDEN", "Rejected by room backend"));
-
-    handler.handleTextMessage(socket, new TextMessage("""
-        {
-          "type": "playback.pause",
-          "requestId": "request-forbidden",
-          "payload": {
-            "commandId": "command-forbidden",
-            "sessionToken": "another-token"
-          }
-        }
-        """));
-
-    JsonNode response = readSentMessage();
-
-    assertEquals("error", response.path("type").asText());
-    assertEquals(
-        "FORBIDDEN",
-        response.path("payload").path("code").asText());
-
-    verify(roomBackend).pause("room-1", "another-token", "command-forbidden");
-    verifyNoInteractions(broadcaster);
-  }
-
-  @Test
-  void shouldReturnErrorWhenPauseRoomIsMissing() throws Exception {
-    authenticateSocket();
-
-    when(roomBackend.pause(
-        "room-1",
-        "valid-token",
-        "command-1")).thenThrow(new RoomNotFoundException("room-1"));
-
-    handler.handleTextMessage(socket, new TextMessage("""
-        {
-          "type": "playback.pause",
-          "requestId": "request-1",
-          "payload": {
-            "commandId": "command-1",
-            "sessionToken": "valid-token"
-          }
-        }
-        """));
-
-    JsonNode response = readSentMessage();
-
-    assertEquals("error", response.path("type").asText());
-    assertEquals(
-        "ROOM_NOT_FOUND",
-        response.path("payload").path("code").asText());
-
-    verifyNoInteractions(broadcaster);
-  }
-
-  @Test
-  void shouldRejectInvalidToken() throws Exception {
-    when(sessionBackend.findByToken("wrong-token"))
-        .thenReturn(Optional.empty());
-
-    handler.handleTextMessage(socket, new TextMessage("""
-        {
-          "type": "session.authenticate",
-          "requestId": "auth-2",
-          "payload": {
-            "sessionToken": "wrong-token"
-          }
-        }
-        """));
-
-    JsonNode response = readSentMessage();
-
-    assertEquals("error", response.path("type").asText());
-    assertEquals(
-        "UNAUTHORIZED",
-        response.path("payload").path("code").asText());
-    assertEquals(0, socket.getAttributes().size());
-  }
-
-  @Test
-  void shouldRejectMissingToken() throws Exception {
-    handler.handleTextMessage(socket, new TextMessage("""
-        {
-          "type": "session.authenticate",
-          "requestId": "auth-3",
-          "payload": {}
-        }
-        """));
-
-    JsonNode response = readSentMessage();
-
-    assertEquals(
-        "INVALID_MESSAGE",
-        response.path("payload").path("code").asText());
-
-    verify(sessionBackend, never()).findByToken(any());
-  }
-
-  @Test
-  void shouldRejectProtectedMessageBeforeAuthentication()
-      throws Exception {
-    handler.handleTextMessage(socket, new TextMessage("""
-        {
-          "type": "playback.pause",
-          "requestId": "command-1",
-          "payload": {}
-        }
-        """));
-
-    JsonNode response = readSentMessage();
-
-    assertEquals(
-        "UNAUTHORIZED",
-        response.path("payload").path("code").asText());
-  }
-
-  @Test
-  void shouldForwardUrlWithoutCheckingProvider() throws Exception {
-    authenticateSocket();
-    clearInvocations(sessionBackend);
-    RoomSnapshot state = new RoomSnapshot("room-1", 9L, true, 0);
-    when(roomBackend.addVideo("room-1", "valid-token", "add-1", "not-a-url"))
-        .thenReturn(state);
-
-    handler.handleTextMessage(socket, new TextMessage("""
-        {"type":"queue.add","requestId":"r1","payload":{
-          "sessionToken":"valid-token","commandId":"add-1","url":"not-a-url"
-        }}
-        """));
-
-    assertEquals("command.ack", readSentMessage().path("type").asText());
-    verify(roomBackend).addVideo("room-1", "valid-token", "add-1", "not-a-url");
-    verifyNoInteractions(sessionBackend);
-  }
-
-  @Test
-  void shouldForwardNegativePositionForBackendDecision() throws Exception {
-    authenticateSocket();
-    when(roomBackend.seek("room-1", "valid-token", "seek-1", -10))
-        .thenThrow(new plotina.gateway.command.CommandRejectedException(
-            "INVALID_POSITION", "Backend rejected the position"));
-
-    handler.handleTextMessage(socket, new TextMessage("""
-        {"type":"playback.seek","requestId":"r1","payload":{
-          "sessionToken":"valid-token","commandId":"seek-1","positionSeconds":-10
-        }}
-        """));
-
-    assertEquals("INVALID_POSITION", readSentMessage().path("payload").path("code").asText());
-    verify(roomBackend).seek("room-1", "valid-token", "seek-1", -10);
-    verifyNoInteractions(broadcaster);
-  }
-
-  @Test
-  void shouldRejectFractionalQueueIndexBeforeBackend() throws Exception {
-    authenticateSocket();
-    handler.handleTextMessage(socket, new TextMessage("""
-        {"type":"queue.move","requestId":"r1","payload":{
-          "sessionToken":"valid-token","commandId":"move-1","itemId":"item-1","toIndex":1.5
-        }}
-        """));
-    assertEquals("INVALID_MESSAGE", readSentMessage().path("payload").path("code").asText());
-    verifyNoInteractions(roomBackend, broadcaster);
-  }
-
-  @Test
-  void shouldRejectNonObjectPayloadBeforeBackend() throws Exception {
-    authenticateSocket();
-    handler.handleTextMessage(socket, new TextMessage("""
-        {"type":"playback.pause","requestId":"r1","payload":[]}
-        """));
-    assertEquals("INVALID_MESSAGE", readSentMessage().path("payload").path("code").asText());
-    verifyNoInteractions(roomBackend, broadcaster);
-  }
-
-  private JsonNode readSentMessage() throws Exception {
-    ArgumentCaptor<TextMessage> captor = ArgumentCaptor.forClass(TextMessage.class);
-
-    verify(socket).sendMessage(captor.capture());
-
-    return objectMapper.readTree(
-        captor.getValue().getPayload());
+  @Test void initializedRoomCommandsDoNotDependOnChatAvailability() throws Exception {
+    sessions.remember("token", "room-1");
+    var connection = registry.get("one");
+    registry.bind(connection, "room-1", "token");
+    connection.ready = true;
+    when(services.chat(any(), any(), any(), any()))
+        .thenThrow(new GatewayException(502, "service_unavailable", "Chat unavailable"));
+    when(services.room(eq("POST"), eq("/rooms/room-1/commands"), eq("token"), any()))
+        .thenReturn(mapper.readTree("{\"command_id\":\"cmd-1\",\"duplicate\":false,\"state\":{\"state_version\":10}}"));
+    handler.handleTextMessage(socket, new TextMessage(
+        "{\"type\":\"playpause\",\"commandId\":\"cmd-1\",\"token\":\"token\",\"payload\":{}}"));
+    var capture = ArgumentCaptor.forClass(TextMessage.class);
+    verify(socket, times(2)).sendMessage(capture.capture());
+    assertEquals("commandConfirm", mapper.readTree(capture.getAllValues().getFirst().getPayload()).path("type").asText());
+    verify(services, never()).chat(any(), any(), any(), any());
   }
 }
