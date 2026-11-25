@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /** Real Gateway HTTP and WebSocket sockets; upstream HTTP fixtures implement the contract only. */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
+    "gateway.allowed-origins=http://frontend.test:3000",
     "gateway.state-refresh-ms=3600000", "gateway.heartbeat-interval-ms=3600000"})
 class ContractIntegrationTest {
   static final ObjectMapper JSON = new ObjectMapper();
@@ -122,6 +123,37 @@ class ContractIntegrationTest {
       assertEquals("invalid_payload", mapper.readTree(response.body()).path("error").path("code").asText());
     }
     assertTrue(calls.isEmpty());
+  }
+
+  @Test void allowsConfiguredFrontendRestOriginAndRejectsUnknownOrigin() throws Exception {
+    for (String origin : List.of("http://frontend.test:3000", "http://untrusted.test:3000")) {
+      var request = HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/rooms"))
+          .header("Origin", origin)
+          .header("Access-Control-Request-Method", "POST")
+          .header("Access-Control-Request-Headers", "content-type")
+          .method("OPTIONS", HttpRequest.BodyPublishers.noBody()).build();
+      var response = client.send(request, HttpResponse.BodyHandlers.ofString());
+      if (origin.contains("frontend.test")) {
+        assertEquals(200, response.statusCode());
+        assertEquals(origin, response.headers().firstValue("Access-Control-Allow-Origin").orElseThrow());
+      } else {
+        assertEquals(403, response.statusCode());
+        assertTrue(response.headers().firstValue("Access-Control-Allow-Origin").isEmpty());
+      }
+    }
+    assertTrue(calls.isEmpty());
+  }
+
+  @Test void websocketHandshakeUsesSameOriginAllowlist() throws Exception {
+    var listener = new WebSocket.Listener() {};
+    var socket = client.newWebSocketBuilder().header("Origin", "http://frontend.test:3000")
+        .buildAsync(URI.create("ws://localhost:" + port + "/ws"), listener).join();
+    socket.sendClose(1000, "test done").join();
+    var exception = assertThrows(CompletionException.class, () -> client.newWebSocketBuilder()
+        .header("Origin", "http://untrusted.test:3000")
+        .buildAsync(URI.create("ws://localhost:" + port + "/ws"), listener).join());
+    assertInstanceOf(WebSocketHandshakeException.class, exception.getCause());
+    assertEquals(403, ((WebSocketHandshakeException) exception.getCause()).getResponse().statusCode());
   }
 
   @ParameterizedTest
