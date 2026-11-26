@@ -1,0 +1,168 @@
+openapi: 3.0.3
+info:
+  title: Plotina Chat Service
+  version: 0.1.0
+  description: >-
+    Internal HTTP API called by API Gateway. Authors are resolved by Room Service
+    from Bearer tokens. WebSocket delivery belongs to Gateway. No chat history or
+    gap recovery endpoint has been agreed yet. Text is currently stored unchanged.
+servers:
+  - url: http://127.0.0.1:6767
+security:
+  - sessionToken: []
+paths:
+  /health:
+    get:
+      operationId: health
+      security: []
+      responses:
+        '200':
+          description: Process is alive; dependencies are not checked.
+          content:
+            text/plain:
+              schema: {type: string, example: "i'm still standing\n"}
+  /ready:
+    get:
+      operationId: readiness
+      security: []
+      responses:
+        '200':
+          description: Chat DB schema is available and Room Service health is ok.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Readiness'}
+        '503':
+          description: A dependency is unavailable or the schema is missing.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Readiness'}
+  /rooms/{room_id}/messages:
+    parameters:
+      - $ref: '#/components/parameters/RoomID'
+    post:
+      operationId: sendMessage
+      description: >-
+        Retry using the original command_id and unchanged text. Deduplication key
+        is (room_id, participant_id from token, command_id). A timeout does not
+        prove that a command failed. The server never assigns a new sequence to
+        an already saved command. There is no separate send/request ID in JSON.
+      requestBody:
+        required: true
+        description: Maximum full JSON body size is 65536 bytes.
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [command_id, text]
+              properties:
+                command_id: {type: string, minLength: 1}
+                text: {type: string, minLength: 1}
+            example: {command_id: cmd-7, text: 'Привет!'}
+      responses:
+        '200':
+          description: New message or saved result. duplicate is always present.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SendResult'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '413': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+        '504': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /rooms/{room_id}/messages/seq:
+    parameters:
+      - $ref: '#/components/parameters/RoomID'
+    get:
+      operationId: getChatSeq
+      description: >-
+        Requires membership. Does not change the counter or create a room record.
+        Does not require command_id. Zero means this chat has no saved messages.
+      responses:
+        '200':
+          description: Last committed sequence in the room.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [messageSeq]
+                properties:
+                  messageSeq: {type: integer, format: int64, minimum: 0}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+        '504': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+components:
+  securitySchemes:
+    sessionToken:
+      type: http
+      scheme: bearer
+      description: Per-tab Room Service token. Never include it in broadcasts.
+  parameters:
+    RoomID:
+      name: room_id
+      in: path
+      required: true
+      schema: {type: string, minLength: 1}
+  schemas:
+    Message:
+      type: object
+      additionalProperties: false
+      required: [message_id, messageSeq, participant_id, text, created_at]
+      properties:
+        message_id: {type: string}
+        messageSeq: {type: integer, format: int64, minimum: 1}
+        participant_id: {type: string}
+        text: {type: string}
+        created_at: {type: string, format: date-time}
+    SendResult:
+      type: object
+      additionalProperties: false
+      required: [command_id, duplicate, message]
+      properties:
+        command_id: {type: string}
+        duplicate: {type: boolean}
+        message: {$ref: '#/components/schemas/Message'}
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: >-
+                unauthorized, wrong_room, room_closed, command_id_conflict,
+                invalid_payload, payload_too_large, unsupported_media_type,
+                room_service_unavailable, room_service_timeout, storage_unavailable,
+                request_timeout, request_cancelled, internal_error, not_found,
+                method_not_allowed.
+            message: {type: string}
+    Readiness:
+      type: object
+      required: [status, checks]
+      properties:
+        status: {type: string, enum: [ok, not_ready]}
+        checks:
+          type: object
+          properties:
+            database: {type: string, enum: [ok, unavailable]}
+            room_service: {type: string, enum: [ok, unavailable]}
+  responses:
+    Error:
+      description: >-
+        Error with a stable code and human-readable message. Internal exceptions
+        and tokens are not exposed. HTTP 503/504 require retrying the same action
+        with its original command_id, not generating a new ID.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}

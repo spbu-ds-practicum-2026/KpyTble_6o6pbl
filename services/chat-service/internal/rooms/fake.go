@@ -6,6 +6,8 @@ import (
 	"plotina/chat-service/internal/chat"
 )
 
+// FakeMembershipChecker uses explicitly configured Room Service responses.
+// It does not contact Room Service or track connection and room lifecycle events.
 type FakeMembershipChecker struct {
 	sessions map[string]chat.Membership
 }

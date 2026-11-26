@@ -1,0 +1,5 @@
+# Local configuration and disposable development/test data.
+.env
+.local/
+__pycache__/
+*.pyc
