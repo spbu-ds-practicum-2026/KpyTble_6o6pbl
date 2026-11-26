@@ -4,6 +4,7 @@ import { getRutubeEmbedUrl } from "./rutube";
 
 interface RutubePlayerProps {
   video: QueueItem | null;
+  videoTitle?: string;
   isPlaying: boolean;
   positionSeconds: number;
   canControl: boolean;
@@ -16,6 +17,14 @@ interface PlayerMessage {
   type: string;
   data: Record<string, unknown>;
 }
+
+/**
+ * Gateway рассылает состояние раз в секунду. Если слать setCurrentTime при
+ * каждом таком обновлении, iframe дёргается. Обычное расхождение в 1–2 секунды
+ * игнорируем и ABS-перемотку делаем только при заметном скачке позиции.
+ */
+const SYNC_JUMP_THRESHOLD_SECONDS = 2;
+const SYNC_EXPECTED_TOLERANCE_SECONDS = 0.75;
 
 function formatClock(value: number): string {
   const safe = Math.max(0, value);
@@ -35,6 +44,7 @@ function formatClock(value: number): string {
  */
 export function RutubePlayer({
   video,
+  videoTitle,
   isPlaying,
   positionSeconds,
   canControl,
@@ -45,6 +55,18 @@ export function RutubePlayer({
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const readyRef = useRef(false);
   const pendingRef = useRef<PlayerMessage[]>([]);
+
+  // Последняя позиция, которую мы реально выставили в iframe. Дальше плеер
+  // крутится сам, и мы сравниваем серверное время именно с этой точкой.
+  const lastAppliedPositionRef = useRef(positionSeconds);
+  const lastAppliedAtRef = useRef(performance.now());
+  const playingRef = useRef(isPlaying);
+  const previousIsPlayingRef = useRef(isPlaying);
+  const previousVideoIdRef = useRef<string | null | undefined>(undefined);
+  // Ожидаемая позиция после локальной перемотки: сервер ещё может не прислать
+  // подтверждение, поэтому ABS-синхронизацию на этот тик пропускаем.
+  const expectedPositionRef = useRef<number | null>(null);
+
   const [displayPosition, setDisplayPosition] =
     useState(positionSeconds);
 
@@ -78,10 +100,72 @@ export function RutubePlayer({
     }
   }, []);
 
+  const localPositionAt = useCallback((now: number): number => {
+    const elapsed = playingRef.current
+      ? Math.max(0, (now - lastAppliedAtRef.current) / 1000)
+      : 0;
+
+    return Math.max(0, lastAppliedPositionRef.current + elapsed);
+  }, []);
+
+  const applyAbsoluteSeek = useCallback(
+    (position: number, now: number): void => {
+      lastAppliedPositionRef.current = position;
+      lastAppliedAtRef.current = now;
+      expectedPositionRef.current = null;
+      setDisplayPosition(position);
+
+      sendPlayerMessage({
+        type: "player:setCurrentTime",
+        data: { time: position }
+      });
+    },
+    [sendPlayerMessage]
+  );
+
+  const applyRelativeSeek = useCallback(
+    (delta: number): void => {
+      const now = performance.now();
+      const target = Math.max(0, localPositionAt(now) + delta);
+
+      lastAppliedPositionRef.current = target;
+      lastAppliedAtRef.current = now;
+      expectedPositionRef.current = target;
+      setDisplayPosition(target);
+
+      sendPlayerMessage({
+        type: "player:relativelySeek",
+        data: { time: delta }
+      });
+      onSeekBy(delta);
+    },
+    [localPositionAt, onSeekBy, sendPlayerMessage]
+  );
+
   useEffect(() => {
+    const videoId = video?.id ?? null;
+
+    if (videoId === previousVideoIdRef.current) {
+      return;
+    }
+
+    previousVideoIdRef.current = videoId;
     readyRef.current = false;
     pendingRef.current = [];
-  }, [video?.id]);
+
+    const now = performance.now();
+    lastAppliedPositionRef.current = positionSeconds;
+    lastAppliedAtRef.current = now;
+    expectedPositionRef.current = null;
+    setDisplayPosition(positionSeconds);
+
+    if (videoId !== null) {
+      sendPlayerMessage({
+        type: "player:setCurrentTime",
+        data: { time: positionSeconds }
+      });
+    }
+  }, [video?.id, positionSeconds, sendPlayerMessage]);
 
   useEffect(() => {
     function handleMessage(event: MessageEvent): void {
@@ -111,22 +195,64 @@ export function RutubePlayer({
   }, [flushPending]);
 
   useEffect(() => {
-    setDisplayPosition(positionSeconds);
-  }, [positionSeconds, video?.id]);
+    const now = performance.now();
 
-  useEffect(() => {
-    sendPlayerMessage({
-      type: "player:setCurrentTime",
-      data: { time: positionSeconds }
-    });
-  }, [positionSeconds, video?.id, sendPlayerMessage]);
+    if (previousIsPlayingRef.current !== isPlaying) {
+      lastAppliedPositionRef.current = localPositionAt(now);
+      lastAppliedAtRef.current = now;
+      previousIsPlayingRef.current = isPlaying;
+      playingRef.current = isPlaying;
+    }
 
-  useEffect(() => {
     sendPlayerMessage({
       type: isPlaying ? "player:play" : "player:pause",
       data: {}
     });
-  }, [isPlaying, video?.id, sendPlayerMessage]);
+  }, [isPlaying, video?.id, sendPlayerMessage, localPositionAt]);
+
+  useEffect(() => {
+    if (demo) {
+      return;
+    }
+
+    const videoId = video?.id ?? null;
+
+    if (videoId === null) {
+      setDisplayPosition(positionSeconds);
+      return;
+    }
+
+    const now = performance.now();
+    const expected = expectedPositionRef.current;
+
+    if (
+      expected !== null &&
+      Math.abs(positionSeconds - expected) <=
+        SYNC_EXPECTED_TOLERANCE_SECONDS
+    ) {
+      expectedPositionRef.current = null;
+      lastAppliedPositionRef.current = positionSeconds;
+      lastAppliedAtRef.current = now;
+      setDisplayPosition(positionSeconds);
+      return;
+    }
+
+    const local = localPositionAt(now);
+    const drift = positionSeconds - local;
+
+    if (Math.abs(drift) > SYNC_JUMP_THRESHOLD_SECONDS) {
+      applyAbsoluteSeek(positionSeconds, now);
+      return;
+    }
+
+    setDisplayPosition(local);
+  }, [
+    positionSeconds,
+    video?.id,
+    demo,
+    localPositionAt,
+    applyAbsoluteSeek
+  ]);
 
   useEffect(() => {
     if (!demo || !isPlaying) {
@@ -162,57 +288,39 @@ export function RutubePlayer({
         }
 
         event.preventDefault();
-        sendPlayerMessage({
-          type: isPlaying ? "player:pause" : "player:play",
-          data: {}
-        });
         onPlayPause();
         return;
       }
 
       if (event.key === "ArrowLeft") {
         event.preventDefault();
-        sendPlayerMessage({
-          type: "player:relativelySeek",
-          data: { time: -10 }
-        });
-        onSeekBy(-10);
+        applyRelativeSeek(-10);
         return;
       }
 
       if (event.key === "ArrowRight") {
         event.preventDefault();
-        sendPlayerMessage({
-          type: "player:relativelySeek",
-          data: { time: 10 }
-        });
-        onSeekBy(10);
+        applyRelativeSeek(10);
       }
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [canControl, isPlaying, onPlayPause, onSeekBy, sendPlayerMessage]);
+  }, [canControl, onPlayPause, applyRelativeSeek]);
 
   function handleSeekBy(delta: number): void {
-    sendPlayerMessage({
-      type: "player:relativelySeek",
-      data: { time: delta }
-    });
-    onSeekBy(delta);
+    applyRelativeSeek(delta);
   }
 
   function handlePlayPause(): void {
-    sendPlayerMessage({
-      type: isPlaying ? "player:pause" : "player:play",
-      data: {}
-    });
     onPlayPause();
   }
 
   const spinner = (
     <div className="player-caption">
-      <span className="player-caption__label">ГЛАВНЫЙ ЭКРАН</span>
+      <span className="player-caption__label" title={videoTitle}>
+        {videoTitle ?? "ГЛАВНЫЙ ЭКРАН"}
+      </span>
       <span className="player-caption__signal">
         <span className="signal-bars" aria-hidden="true">
           <i />

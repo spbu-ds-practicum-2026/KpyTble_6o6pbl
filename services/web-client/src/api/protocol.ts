@@ -3,6 +3,7 @@ export type ParticipantRole = "host" | "member";
 
 /** Сетевые модели из api-contract.md (snake_case). */
 export interface ContractParticipant {
+  id?: string;
   display_name: string;
   role: ParticipantRole | string;
   connected: boolean;
@@ -45,6 +46,12 @@ export interface ContractChatMessage {
   participant_id: string;
   text: string;
   created_at: string;
+  // Не все бэкенды кладут сюда имя. Поддерживаем частые варианты полей,
+  // чтобы в чате не показывать голый UUID.
+  display_name?: string;
+  participant_name?: string;
+  author_name?: string;
+  displayName?: string;
 }
 
 export interface ContractError {
@@ -93,6 +100,7 @@ export interface QueueItem {
 }
 
 export interface Participant {
+  id?: string;
   displayName: string;
   role: ParticipantRole | string;
   connected: boolean;
@@ -119,6 +127,7 @@ export interface Session {
   token: string;
   roomId: string;
   displayName: string;
+  participantId?: string;
   role: ParticipantRole | string;
 }
 
@@ -126,6 +135,7 @@ export interface ChatMessage {
   messageId: string;
   messageSeq: number;
   participantId: string;
+  displayName?: string;
   text: string;
   createdAt: string;
 }
@@ -190,6 +200,10 @@ export function normalizeRoomState(
       : [],
     participants: Array.isArray(state.participants)
       ? state.participants.map((participant) => ({
+          id:
+            typeof participant.id === "string" && participant.id
+              ? participant.id
+              : undefined,
           displayName: participant.display_name,
           role: participant.role,
           connected: participant.connected === true
@@ -210,10 +224,21 @@ export function normalizeChatMessage(
     throw new Error("Gateway returned an invalid chat message");
   }
 
+  const displayName = [
+    message.display_name,
+    message.participant_name,
+    message.author_name,
+    message.displayName
+  ].find(
+    (value): value is string =>
+      typeof value === "string" && value.trim().length > 0
+  )?.trim();
+
   return {
     messageId: message.message_id,
     messageSeq: message.messageSeq,
     participantId: message.participant_id ?? "",
+    displayName,
     text: message.text,
     createdAt: message.created_at ?? ""
   };
@@ -234,6 +259,10 @@ export function normalizeBootstrap(
       token: response.token,
       roomId: response.room_id,
       displayName: response.participant?.display_name ?? "",
+      participantId:
+        typeof response.participant?.id === "string"
+          ? response.participant.id
+          : undefined,
       role: response.participant?.role ?? "member"
     },
     state: normalizeRoomState(response.state, response.room_id),

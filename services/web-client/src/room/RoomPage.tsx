@@ -5,8 +5,9 @@ import {
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent
 } from "react";
-import type { RoomBootstrap } from "../api/protocol";
+import type { ChatMessage, RoomBootstrap } from "../api/protocol";
 import { RutubePlayer } from "../player/RutubePlayer";
+import { useRutubeTitles } from "../player/useRutubeTitles";
 import { useRoomController } from "./useRoomController";
 
 interface RoomPageProps {
@@ -41,6 +42,35 @@ export function RoomPage({
   const controller = useRoomController(bootstrap, {
     onLeft: onLeave
   });
+  const videoTitles = useRutubeTitles(controller.state.queue);
+  const currentVideo =
+    controller.state.queue.find(
+      (item) => item.id === controller.state.currentVideoId
+    ) ?? null;
+
+  function authorOf(message: ChatMessage): {
+    name: string;
+    isOwn: boolean;
+  } {
+    const isOwn =
+      (bootstrap.session.participantId !== undefined &&
+        message.participantId === bootstrap.session.participantId) ||
+      message.participantId === bootstrap.session.displayName;
+
+    const participant = controller.state.participants.find(
+      (item) => item.id && item.id === message.participantId
+    );
+
+    const name =
+      message.displayName ??
+      participant?.displayName ??
+      (isOwn ? bootstrap.session.displayName : undefined) ??
+      (message.participantId
+        ? `Участник ${message.participantId.slice(0, 8)}`
+        : "Участник");
+
+    return { name, isOwn };
+  }
 
   const [videoUrl, setVideoUrl] = useState("");
   const [chatText, setChatText] = useState("");
@@ -265,10 +295,9 @@ export function RoomPage({
       <div className="room-grid">
         <section className="main-column">
           <RutubePlayer
-            video={
-              controller.state.queue.find(
-                (item) => item.id === controller.state.currentVideoId
-              ) ?? null
+            video={currentVideo}
+            videoTitle={
+              currentVideo ? videoTitles[currentVideo.id] : undefined
             }
             isPlaying={controller.state.playback.isPlaying}
             positionSeconds={
@@ -496,8 +525,10 @@ export function RoomPage({
                           href={item.url}
                           target="_blank"
                           rel="noreferrer"
+                          title={videoTitles[item.id] ?? item.url}
                         >
-                          Видео {String(index + 1).padStart(2, "0")}
+                          {videoTitles[item.id] ??
+                            "Загрузка названия…"}
                         </a>
                         <span className="queue-card__host">
                           {formatHost(item.url)}
@@ -647,24 +678,22 @@ export function RoomPage({
                 </div>
               ) : (
                 controller.messages.map((message) => {
-                  const isOwn =
-                    message.participantId ===
-                    bootstrap.session.displayName;
+                  const author = authorOf(message);
 
                   return (
                     <article
                       key={message.messageId}
                       className={`message ${
-                        isOwn ? "message--own" : ""
+                        author.isOwn ? "message--own" : ""
                       }`}
                     >
                       <span className="message__avatar" aria-hidden="true">
-                        {initial(message.participantId)}
+                        {initial(author.name)}
                       </span>
 
                       <div className="message__body">
                         <header>
-                          <strong>{message.participantId}</strong>
+                          <strong>{author.name}</strong>
                           <time dateTime={message.createdAt}>
                             {formatTime(message.createdAt)}
                           </time>

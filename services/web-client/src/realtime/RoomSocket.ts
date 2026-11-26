@@ -38,6 +38,33 @@ interface RoomSocketOptions {
 const MIN_RECONNECT_DELAY_MS = 1000;
 const MAX_RECONNECT_DELAY_MS = 15000;
 
+/**
+ * `crypto.randomUUID()` доступен только в безопасном контексте (HTTPS и
+ * localhost). Страница по http://192.168.* таким контекстом не является,
+ * поэтому для LAN-адреса нужен запасной генератор. Контракту важен только
+ * уникальный ID команды, а не формат UUID.
+ */
+function newCommandId(): string {
+  const webCrypto = globalThis.crypto;
+
+  if (typeof webCrypto?.randomUUID === "function") {
+    return webCrypto.randomUUID();
+  }
+
+  if (typeof webCrypto?.getRandomValues === "function") {
+    const bytes = new Uint8Array(16);
+    webCrypto.getRandomValues(bytes);
+
+    return Array.from(bytes, (byte) =>
+      byte.toString(16).padStart(2, "0")
+    ).join("");
+  }
+
+  return `${Date.now().toString(16)}-${Math.random()
+    .toString(16)
+    .slice(2)}-${Math.random().toString(16).slice(2)}`;
+}
+
 function getDefaultWsUrl(): string {
   const configuredUrl = import.meta.env.VITE_WS_URL?.trim();
 
@@ -207,7 +234,7 @@ export class RoomSocket {
     type: string,
     payload: Record<string, unknown>
   ): string {
-    const commandId = crypto.randomUUID();
+    const commandId = newCommandId();
 
     this.pendingCommands.set(commandId, {
       commandId,

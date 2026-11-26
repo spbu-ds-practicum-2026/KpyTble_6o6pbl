@@ -603,7 +603,10 @@ export function useRoomController(
           acceptMessage({
             messageId: `demo-message-${nextSeq}-${Date.now()}`,
             messageSeq: nextSeq,
-            participantId: bootstrap.session.displayName,
+            participantId:
+              bootstrap.session.participantId ??
+              bootstrap.session.displayName,
+            displayName: bootstrap.session.displayName,
             text,
             createdAt: new Date().toISOString()
           });

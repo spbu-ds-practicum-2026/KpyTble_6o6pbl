@@ -8,21 +8,24 @@ export const DEMO_MESSAGES: ChatMessage[] = [
   {
     messageId: "demo-message-1",
     messageSeq: 1,
-    participantId: "Bob",
+    participantId: "demo-bob",
+    displayName: "Bob",
     text: "Привет! Видео уже в очереди.",
     createdAt: "2026-11-26T12:04:00.000Z"
   },
   {
     messageId: "demo-message-2",
     messageSeq: 2,
-    participantId: "Carol",
+    participantId: "demo-carol",
+    displayName: "Carol",
     text: "Перемотку поставила на 42 секунды 👀",
     createdAt: "2026-11-26T12:04:18.000Z"
   },
   {
     messageId: "demo-message-3",
     messageSeq: 3,
-    participantId: "Alice",
+    participantId: "demo-alice",
+    displayName: "Alice",
     text: "Отлично, тогда начинаем.",
     createdAt: "2026-11-26T12:04:31.000Z"
   }
@@ -34,6 +37,7 @@ export function createDemoBootstrap(): RoomBootstrap {
       token: "demo-token",
       roomId: "DEMO-ROOM",
       displayName: "Alice",
+      participantId: "demo-alice",
       role: "host"
     },
     state: {
@@ -66,16 +70,19 @@ export function createDemoBootstrap(): RoomBootstrap {
       ],
       participants: [
         {
+          id: "demo-alice",
           displayName: "Alice",
           role: "host",
           connected: true
         },
         {
+          id: "demo-bob",
           displayName: "Bob",
           role: "member",
           connected: true
         },
         {
+          id: "demo-carol",
           displayName: "Carol",
           role: "member",
           connected: false

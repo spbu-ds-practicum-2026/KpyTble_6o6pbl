@@ -772,6 +772,13 @@ select option {
   text-transform: uppercase;
 }
 
+.player-caption__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .player-caption__signal {
   display: flex;
   align-items: center;
