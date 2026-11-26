@@ -1,25 +1,48 @@
 import { useState, type FormEvent } from "react";
-import type { RoomBootstrap } from "./api/protocol";
-import {
-  ApiError,
-  createRoom,
-  joinRoom
-} from "./api/restClient";
+import type { ControlMode, RoomBootstrap } from "./api/protocol";
+import { ApiError, createRoom, joinRoom } from "./api/restClient";
 import { RoomPage } from "./room/RoomPage";
-import {
-  clearSession,
-//   loadSession,
-  saveSession
-} from "./room/sessionStorage";
+import { createDemoBootstrap } from "./room/demoBootstrap";
+import { clearSession, saveSession } from "./room/sessionStorage";
 
-function getRoomIdFromUrl(): string {
-  return new URL(window.location.href).searchParams.get("room") ?? "";
+function getInviteCodeFromUrl(): string {
+  const url = new URL(window.location.href);
+  const fromQuery =
+    url.searchParams.get("invite") ?? url.searchParams.get("code");
+
+  if (fromQuery) {
+    return fromQuery;
+  }
+
+  const fromPath = url.pathname.match(/\/rooms\/([^/]+)/);
+  return fromPath ? decodeURIComponent(fromPath[1]) : "";
+}
+
+function rememberInvite(bootstrap: RoomBootstrap): void {
+  const url = new URL(window.location.href);
+
+  url.searchParams.set("invite", bootstrap.inviteCode);
+  window.history.replaceState(null, "", url.toString());
+}
+
+function isDemoRequested(): boolean {
+  const url = new URL(window.location.href);
+
+  return (
+    url.searchParams.get("demo") === "1" ||
+    url.hash === "#demo" ||
+    url.pathname === "/demo"
+  );
 }
 
 export default function App() {
-  const [roomId, setRoomId] = useState(getRoomIdFromUrl);
-  const [bootstrap, setBootstrap] =
-    useState<RoomBootstrap | null>(null);
+  const [displayName, setDisplayName] = useState("Alice");
+  const [inviteCode, setInviteCode] = useState(getInviteCodeFromUrl);
+  const [controlMode, setControlMode] =
+    useState<ControlMode>("host_only");
+  const [bootstrap, setBootstrap] = useState<RoomBootstrap | null>(
+    () => (isDemoRequested() ? createDemoBootstrap() : null)
+  );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -33,6 +56,7 @@ export default function App() {
       const result = await operation();
 
       saveSession(result.session);
+      rememberInvite(result);
       setBootstrap(result);
     } catch (caughtError) {
       if (caughtError instanceof ApiError) {
@@ -50,111 +74,152 @@ export default function App() {
   }
 
   async function handleCreate(): Promise<void> {
-    await run(createRoom);
+    const name = displayName.trim();
+
+    if (!name) {
+      return;
+    }
+
+    await run(() => createRoom(name, controlMode));
   }
 
   async function handleJoin(event: FormEvent): Promise<void> {
     event.preventDefault();
 
-    const normalizedRoomId = roomId.trim();
+    const code = inviteCode.trim();
+    const name = displayName.trim();
 
-    if (!normalizedRoomId) {
+    if (!code || !name) {
       return;
     }
 
-    await run(() => joinRoom(normalizedRoomId));
+    await run(() => joinRoom(code, name));
   }
 
-//   async function restoreSession(): Promise<void> {
-//     const session = loadSession();
-
-//     if (!session) {
-//       setError("В этой вкладке нет сохранённой сессии");
-//       return;
-//     }
-
-//     await run(async () => {
-//       const joined = await joinRoom(session.roomId);
-
-//       /*
-//        * Текущий Gateway не имеет отдельного REST endpoint
-//        * восстановления сессии. Поэтому временно join создаёт новую
-//        * сессию. После появления endpoint восстановления этот код
-//        * нужно заменить.
-//        */
-//       return joined;
-//     });
-//   }
+  function handleLeave(): void {
+    clearSession();
+    setBootstrap(null);
+  }
 
   if (bootstrap) {
     return (
-      <RoomPage
-        bootstrap={bootstrap}
-        onLeave={() => {
-          clearSession();
-          setBootstrap(null);
-        }}
-      />
+      <RoomPage bootstrap={bootstrap} onLeave={handleLeave} />
     );
   }
 
   return (
     <main className="landing">
       <section className="landing-card">
-        <h1>Plotina</h1>
-        <p>Совместный просмотр видео с очередью и чатом.</p>
+        <span className="corner corner--tl" aria-hidden="true" />
+        <span className="corner corner--tr" aria-hidden="true" />
+        <span className="corner corner--bl" aria-hidden="true" />
+        <span className="corner corner--br" aria-hidden="true" />
+
+        <header className="landing-header">
+          <span className="eyebrow">
+            ПЛОТИНА // ПУЛЬТ СОВМЕСТНОГО ПРОСМОТРА
+          </span>
+          <h1>
+            ПЛОТИНА<span className="title-spark">✦</span>
+          </h1>
+          <p className="landing-tagline">
+            СМОТРИ ВМЕСТЕ. УПРАВЛЯЙ КАК БОГ. НЕ ДАЙ ОЧЕРЕДИ
+            УЛЕТЕТЬ В ЧЁРНУЮ ДЫРУ.
+          </p>
+        </header>
 
         {error && (
           <div className="error" role="alert">
-            {error}
+            <span className="error__icon" aria-hidden="true">
+              !
+            </span>
+            <div>
+              <strong>СБОЙ СИСТЕМЫ</strong>
+              <p>{error}</p>
+            </div>
           </div>
         )}
 
+        <div className="landing-grid">
+          <label className="field">
+            <span>01 / ПОЗЫВНОЙ</span>
+            <input
+              id="display-name"
+              value={displayName}
+              onChange={(event) =>
+                setDisplayName(event.target.value)
+              }
+              placeholder="Alice"
+              required
+            />
+          </label>
+
+          <label className="field">
+            <span>02 / РЕЖИМ</span>
+            <select
+              id="control-mode"
+              value={controlMode}
+              onChange={(event) =>
+                setControlMode(event.target.value as ControlMode)
+              }
+            >
+              <option value="host_only">ТОЛЬКО ВЕДУЩИЙ</option>
+              <option value="all">ВСЯ КОМАНДА</option>
+            </select>
+          </label>
+        </div>
+
         <button
           type="button"
-          className="button button--large"
+          className="button button--hero"
           onClick={() => {
             void handleCreate();
           }}
           disabled={loading}
         >
-          Создать комнату
+          🚀 СОЗДАТЬ КОМНАТУ
         </button>
 
-        <div className="separator">или</div>
+        <button
+          type="button"
+          className="button button--demo"
+          onClick={() => setBootstrap(createDemoBootstrap())}
+        >
+          ✨ ДЕМО-РЕЙС БЕЗ СЕРВИСОВ
+        </button>
 
-        <form onSubmit={handleJoin}>
-          <label htmlFor="room-id">Идентификатор комнаты</label>
+        <div className="separator">
+          <span>ИЛИ ПРИСОЕДИНИТЬСЯ К ЭКИПАЖУ</span>
+        </div>
 
-          <input
-            id="room-id"
-            value={roomId}
-            onChange={(event) => setRoomId(event.target.value)}
-            placeholder="demo-room"
-            required
-          />
+        <form className="join-form" onSubmit={handleJoin}>
+          <label className="field">
+            <span>03 / КОД ПРИГЛАШЕНИЯ</span>
+            <input
+              id="invite-code"
+              value={inviteCode}
+              onChange={(event) =>
+                setInviteCode(event.target.value)
+              }
+              placeholder="AbCdEf_12345"
+              required
+            />
+          </label>
 
           <button
-            className="button button--large"
+            className="button button--join"
             type="submit"
             disabled={loading}
           >
-            Подключиться
+            ВОЙТИ В КОМНАТУ →
           </button>
         </form>
 
-        {/* <button
-          type="button"
-          className="button button--secondary"
-          onClick={() => {
-            void restoreSession();
-          }}
-          disabled={loading}
-        >
-          Восстановить сессию вкладки
-        </button> */}
+        {loading && <p className="hint">СОЕДИНЕНИЕ СО СТАНЦИЕЙ...</p>}
 
-        {loading && <p className="hint">Подключение…</p>}
+        <footer className="landing-footer">
+          Space — плей/пауза · ← → — перемотка на 10 секунд
+        </footer>
       </section>
     </main>
   );

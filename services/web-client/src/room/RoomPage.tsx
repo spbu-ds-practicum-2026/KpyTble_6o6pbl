@@ -1,4 +1,10 @@
-import { useMemo, useState, type FormEvent } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent
+} from "react";
 import type { RoomBootstrap } from "../api/protocol";
 import { RutubePlayer } from "../player/RutubePlayer";
 import { useRoomController } from "./useRoomController";
@@ -8,51 +14,122 @@ interface RoomPageProps {
   onLeave: () => void;
 }
 
+function formatTime(value: string): string {
+  const date = new Date(value);
+
+  return Number.isNaN(date.getTime())
+    ? ""
+    : date.toLocaleTimeString();
+}
+
+function formatHost(value: string): string {
+  try {
+    return new URL(value).hostname.replace(/^www\./, "");
+  } catch {
+    return value;
+  }
+}
+
+function initial(value: string): string {
+  return value.trim().charAt(0).toUpperCase() || "?";
+}
+
 export function RoomPage({
   bootstrap,
   onLeave
 }: RoomPageProps) {
-  const controller = useRoomController(bootstrap);
+  const controller = useRoomController(bootstrap, {
+    onLeft: onLeave
+  });
 
   const [videoUrl, setVideoUrl] = useState("");
   const [chatText, setChatText] = useState("");
+  const [copied, setCopied] = useState("");
   const [seekPosition, setSeekPosition] = useState(
-    String(controller.state.positionSeconds)
+    String(bootstrap.state.playback.positionSeconds)
   );
 
-  const inviteUrl = useMemo(() => {
-    const url = new URL(window.location.href);
-    url.searchParams.set("room", controller.state.roomId);
-    return url.toString();
-  }, [controller.state.roomId]);
+  const copyTimerRef = useRef<number | null>(null);
+  const seekBaseRef = useRef(
+    bootstrap.state.playback.positionSeconds
+  );
 
-  function addVideo(event: FormEvent) {
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    seekBaseRef.current = controller.state.playback.positionSeconds;
+    setSeekPosition(
+      controller.state.playback.positionSeconds.toFixed(1)
+    );
+  }, [controller.state.playback.positionSeconds]);
+
+  async function copyValue(value: string, label: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(label);
+
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+
+      copyTimerRef.current = window.setTimeout(() => {
+        setCopied("");
+        copyTimerRef.current = null;
+      }, 1500);
+    } catch {
+      setCopied("");
+    }
+  }
+
+  function seekBy(delta: number): void {
+    const next = Math.max(0, seekBaseRef.current + delta);
+    seekBaseRef.current = next;
+    controller.seek(next);
+  }
+
+  function addVideo(event: FormEvent): void {
     event.preventDefault();
 
     const normalizedUrl = videoUrl.trim();
 
-    if (!normalizedUrl) {
+    if (!normalizedUrl || !controller.addVideo(normalizedUrl)) {
       return;
     }
 
-    controller.addVideo(normalizedUrl);
     setVideoUrl("");
   }
 
-  function sendMessage(event: FormEvent) {
-    event.preventDefault();
-
+  function submitChat(): void {
     const normalizedText = chatText.trim();
 
-    if (!normalizedText) {
+    if (!normalizedText || !controller.sendChatMessage(normalizedText)) {
       return;
     }
 
-    controller.sendChatMessage(normalizedText);
     setChatText("");
   }
 
-  function seek(event: FormEvent) {
+  function sendMessage(event: FormEvent): void {
+    event.preventDefault();
+    submitChat();
+  }
+
+  function handleChatKeyDown(
+    event: ReactKeyboardEvent<HTMLTextAreaElement>
+  ): void {
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      submitChat();
+    }
+  }
+
+  function seek(event: FormEvent): void {
     event.preventDefault();
 
     const position = Number(seekPosition);
@@ -61,53 +138,120 @@ export function RoomPage({
       return;
     }
 
+    seekBaseRef.current = position;
     controller.seek(position);
+  }
+
+  function moveQueue(index: number, delta: number): void {
+    const videoIds = controller.state.queue.map((item) => item.id);
+    const target = index + delta;
+
+    if (target < 0 || target >= videoIds.length) {
+      return;
+    }
+
+    [videoIds[index], videoIds[target]] = [
+      videoIds[target],
+      videoIds[index]
+    ];
+
+    controller.changeQueue(videoIds);
   }
 
   return (
     <main className="page">
       <header className="room-header">
-        <div>
-          <h1>Комната {controller.state.roomId}</h1>
-          <p>
-            Версия состояния: {controller.state.stateVersion}
-          </p>
+        <div className="room-identity">
+          <span className="eyebrow">СЕАНС // plotina.live</span>
+
+          <h1>
+            <span>Комната</span> {bootstrap.state.roomId}
+          </h1>
+
+          <div className="room-meta">
+            <span className="meta-chip">
+              v{controller.state.stateVersion}
+            </span>
+            <span className="meta-chip">
+              {controller.state.controlMode}
+            </span>
+            <span className="meta-chip">{controller.role}</span>
+            <span className="meta-chip">
+              {controller.state.status}
+            </span>
+          </div>
+
+          <button
+            type="button"
+            className="invite-code"
+            onClick={() => {
+              void copyValue(bootstrap.inviteCode, "код");
+            }}
+            title="Скопировать код приглашения"
+          >
+            <span>КОД ПРИГЛАШЕНИЯ</span>
+            <strong>{bootstrap.inviteCode}</strong>
+            <span className="invite-code__icon">
+              {copied === "код" ? "✓" : "⧉"}
+            </span>
+          </button>
         </div>
 
         <div className="header-actions">
           <span
             className={`connection connection--${controller.connectionStatus}`}
           >
-            {controller.connectionStatus}
+            <span className="connection__dot" />
+            {bootstrap.demo
+              ? "ДЕМО-РЕЙС"
+              : controller.connectionStatus.toUpperCase()}
           </span>
 
           <button
             type="button"
-            className="button button--secondary"
+            className="button button--ghost"
             onClick={() => {
-              void navigator.clipboard.writeText(inviteUrl);
+              void copyValue(bootstrap.inviteLink, "ссылка");
             }}
           >
-            Скопировать приглашение
+            {copied === "ссылка" ? "✓ СКОПИРОВАНО" : "⧉ ССЫЛКА"}
           </button>
 
           <button
             type="button"
             className="button button--danger"
-            onClick={onLeave}
+            onClick={controller.leaveRoom}
+            disabled={controller.leaving}
           >
-            Выйти
+            {controller.leaving ? "ВЫХОД..." : "ВЫЙТИ ⟶"}
           </button>
         </div>
       </header>
 
+      {bootstrap.demo && (
+        <div className="demo-banner" role="status">
+          <span className="demo-banner__icon" aria-hidden="true">
+            🚀
+          </span>
+          <div>
+            <strong>ДЕМО-РЕЙС АКТИВЕН</strong>
+            <span>
+              Gateway не нужен: кнопки и чат меняют только этот экран.
+            </span>
+          </div>
+          <span className="demo-banner__badge">LOCAL ONLY</span>
+        </div>
+      )}
+
       {controller.lastError && (
         <div className="error" role="alert">
+          <span className="error__icon" aria-hidden="true">
+            !
+          </span>
           <div>
             <strong>{controller.lastError.code}</strong>
             <p>{controller.lastError.message}</p>
           </div>
-
           <button
             type="button"
             onClick={controller.clearError}
@@ -121,87 +265,185 @@ export function RoomPage({
       <div className="room-grid">
         <section className="main-column">
           <RutubePlayer
-            video={controller.state.currentVideo}
-            paused={controller.state.paused}
-            positionSeconds={controller.state.positionSeconds}
+            video={
+              controller.state.queue.find(
+                (item) => item.id === controller.state.currentVideoId
+              ) ?? null
+            }
+            isPlaying={controller.state.playback.isPlaying}
+            positionSeconds={
+              controller.state.playback.positionSeconds
+            }
+            canControl={controller.canControl}
+            demo={bootstrap.demo === true}
+            onPlayPause={controller.playpause}
+            onSeekBy={seekBy}
           />
 
-          <section className="panel">
-            <h2>Управление</h2>
+          <section className="panel panel--transport">
+            <div className="panel-heading">
+              <span className="panel-heading__index">01</span>
+              <div>
+                <span className="eyebrow">ПУЛЬТ УПРАВЛЕНИЯ</span>
+                <h2>Транспорт</h2>
+              </div>
+              <span className="panel-heading__icon" aria-hidden="true">
+                🎛
+              </span>
+            </div>
 
-            <div className="controls">
+            <div className="transport-deck">
               <button
                 type="button"
-                className="button"
-                onClick={controller.play}
-                disabled={
-                  controller.connectionStatus !== "connected"
-                }
+                className="transport-button"
+                onClick={() => seekBy(-10)}
+                disabled={!controller.canControl}
               >
-                ▶ Продолжить
+                <span className="transport-button__glyph">↺</span>
+                <span>10 сек назад</span>
               </button>
 
               <button
                 type="button"
-                className="button"
-                onClick={controller.pause}
-                disabled={
-                  controller.connectionStatus !== "connected"
-                }
+                className="transport-button transport-button--main"
+                onClick={controller.playpause}
+                disabled={!controller.canControl}
               >
-                ⏸ Пауза
+                <span className="transport-button__glyph">
+                  {controller.state.playback.isPlaying ? "❚❚" : "▶"}
+                </span>
+                <span>
+                  {controller.state.playback.isPlaying
+                    ? "Пауза"
+                    : "Плей"}
+                </span>
               </button>
 
               <button
                 type="button"
-                className="button"
-                onClick={controller.next}
-                disabled={
-                  controller.connectionStatus !== "connected"
-                }
+                className="transport-button"
+                onClick={() => seekBy(10)}
+                disabled={!controller.canControl}
               >
-                Следующее видео
+                <span className="transport-button__glyph">↻</span>
+                <span>10 сек вперёд</span>
+              </button>
+
+              <button
+                type="button"
+                className="transport-button"
+                onClick={controller.nextVideo}
+                disabled={!controller.canControl}
+              >
+                <span className="transport-button__glyph">⏭</span>
+                <span>Следующее</span>
               </button>
             </div>
 
-            <form className="inline-form" onSubmit={seek}>
-              <label htmlFor="seek-position">Позиция, сек.</label>
-              <input
-                id="seek-position"
-                min="0"
-                step="0.1"
-                type="number"
-                value={seekPosition}
-                onChange={(event) =>
-                  setSeekPosition(event.target.value)
-                }
-              />
-              <button
-                className="button"
-                type="submit"
-                disabled={
-                  controller.connectionStatus !== "connected"
-                }
-              >
-                Перемотать
-              </button>
+            <form className="seek-console" onSubmit={seek}>
+              <label htmlFor="seek-position">
+                ТОЧНАЯ ПОЗИЦИЯ / СЕКУНДЫ
+              </label>
+              <div className="seek-console__row">
+                <input
+                  id="seek-position"
+                  min="0"
+                  step="0.1"
+                  type="number"
+                  value={seekPosition}
+                  onChange={(event) =>
+                    setSeekPosition(event.target.value)
+                  }
+                />
+                <button
+                  className="button button--compact"
+                  type="submit"
+                  disabled={!controller.canControl}
+                >
+                  ПРЫЖОК →
+                </button>
+              </div>
             </form>
+
+            <div className="shortcut-bar">
+              <span>
+                <kbd>Space</kbd> плей / пауза
+              </span>
+              <span>
+                <kbd>←</kbd> −10 сек
+              </span>
+              <span>
+                <kbd>→</kbd> +10 сек
+              </span>
+            </div>
 
             <button
               type="button"
-              className="button button--secondary"
-              onClick={() => {
-                void controller.synchronizeState();
-              }}
+              className="sync-button"
+              onClick={controller.synchronizeState}
+              disabled={controller.connectionStatus !== "connected"}
             >
-              Сверить состояние
+              ⟳ СВЕРИТЬ С СЕРВЕРОМ
             </button>
           </section>
 
-          <section className="panel">
-            <h2>Очередь</h2>
+          {controller.canSetSettings && (
+            <section className="panel panel--settings">
+              <div className="panel-heading">
+                <span className="panel-heading__index">02</span>
+                <div>
+                  <span className="eyebrow">ДОСТУП К ПУЛЬТУ</span>
+                  <h2>Режим управления</h2>
+                </div>
+                <span
+                  className="panel-heading__icon"
+                  aria-hidden="true"
+                >
+                  🔐
+                </span>
+              </div>
 
-            <form className="inline-form" onSubmit={addVideo}>
+              <div className="mode-switch">
+                {(["host_only", "all"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    className={`mode-switch__button ${
+                      controller.state.controlMode === mode
+                        ? "is-active"
+                        : ""
+                    }`}
+                    onClick={() => controller.setSettings(mode)}
+                  >
+                    {mode === "host_only"
+                      ? "Только ведущий"
+                      : "Вся команда"}
+                  </button>
+                ))}
+              </div>
+
+              <p className="hint">
+                Переключать режим может только ведущий.
+              </p>
+            </section>
+          )}
+
+          <section className="panel panel--queue">
+            <div className="panel-heading">
+              <span className="panel-heading__index">03</span>
+              <div>
+                <span className="eyebrow">ПОРЯДОК ВЗЛЁТА</span>
+                <h2>Очередь</h2>
+              </div>
+              <span className="panel-heading__icon" aria-hidden="true">
+                🛰
+              </span>
+            </div>
+
+            <form className="queue-add" onSubmit={addVideo}>
+              <span className="queue-add__icon" aria-hidden="true">
+                ＋
+              </span>
               <input
                 type="url"
                 value={videoUrl}
@@ -211,151 +453,257 @@ export function RoomPage({
                 }
                 required
               />
-
               <button
-                className="button"
+                className="button button--compact"
                 type="submit"
-                disabled={
-                  controller.connectionStatus !== "connected"
-                }
+                disabled={!controller.canControl}
               >
-                Добавить
+                В ОЧЕРЕДЬ
               </button>
             </form>
 
             {controller.state.queue.length === 0 ? (
-              <p className="hint">Очередь пуста.</p>
+              <div className="empty-state">
+                Очередь пуста. Самое время запустить ракету с ссылкой.
+              </div>
             ) : (
               <ol className="queue">
-                {controller.state.queue.map((item, index) => (
-                  <li
-                    key={item.itemId}
-                    className={
-                      item.itemId ===
-                      controller.state.currentVideo?.itemId
-                        ? "queue__item queue__item--current"
-                        : "queue__item"
-                    }
-                  >
-                    <a
-                      href={item.url}
-                      target="_blank"
-                      rel="noreferrer"
+                {controller.state.queue.map((item, index) => {
+                  const isCurrent =
+                    item.id === controller.state.currentVideoId;
+
+                  return (
+                    <li
+                      key={item.id}
+                      className={`queue-card ${
+                        isCurrent ? "queue-card--current" : ""
+                      }`}
                     >
-                      Видео {index + 1}
-                    </a>
-
-                    <div>
-                      <button
-                        type="button"
-                        disabled={index === 0}
-                        onClick={() =>
-                          controller.moveVideo(
-                            item.itemId,
-                            index - 1
-                          )
-                        }
+                      <span
+                        className="queue-card__handle"
+                        aria-hidden="true"
                       >
-                        ↑
-                      </button>
+                        ⠿
+                      </span>
 
-                      <button
-                        type="button"
-                        disabled={
-                          index ===
-                          controller.state.queue.length - 1
-                        }
-                        onClick={() =>
-                          controller.moveVideo(
-                            item.itemId,
-                            index + 1
-                          )
-                        }
-                      >
-                        ↓
-                      </button>
+                      <span className="queue-card__index">
+                        {String(index + 1).padStart(2, "0")}
+                      </span>
 
-                      <button
-                        type="button"
-                        onClick={() =>
-                          controller.removeVideo(item.itemId)
-                        }
-                      >
-                        Удалить
-                      </button>
-                    </div>
-                  </li>
-                ))}
+                      <div className="queue-card__body">
+                        <a
+                          className="queue-card__title"
+                          href={item.url}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Видео {String(index + 1).padStart(2, "0")}
+                        </a>
+                        <span className="queue-card__host">
+                          {formatHost(item.url)}
+                        </span>
+                      </div>
+
+                      {isCurrent && (
+                        <span className="queue-card__now">
+                          НА ЭКРАНЕ
+                        </span>
+                      )}
+
+                      <div className="queue-card__actions">
+                        <button
+                          type="button"
+                          className="icon-button"
+                          title="Выше"
+                          aria-label="Переместить видео выше"
+                          disabled={
+                            !controller.canControl || index === 0
+                          }
+                          onClick={() => moveQueue(index, -1)}
+                        >
+                          ↑
+                        </button>
+
+                        <button
+                          type="button"
+                          className="icon-button"
+                          title="Ниже"
+                          aria-label="Переместить видео ниже"
+                          disabled={
+                            !controller.canControl ||
+                            index === controller.state.queue.length - 1
+                          }
+                          onClick={() => moveQueue(index, 1)}
+                        >
+                          ↓
+                        </button>
+
+                        <button
+                          type="button"
+                          className="icon-button icon-button--danger"
+                          title="Удалить"
+                          aria-label="Удалить видео из очереди"
+                          disabled={!controller.canControl}
+                          onClick={() =>
+                            controller.removeVideo(item.id)
+                          }
+                        >
+                          ×
+                        </button>
+                      </div>
+                    </li>
+                  );
+                })}
               </ol>
             )}
           </section>
         </section>
 
         <aside className="side-column">
-          <section className="panel">
-            <h2>Участники</h2>
+          <section className="panel panel--crew">
+            <div className="panel-heading">
+              <span className="panel-heading__index">04</span>
+              <div>
+                <span className="eyebrow">ЭКИПАЖ НА БОРТУ</span>
+                <h2>Участники</h2>
+              </div>
+              <span className="panel-heading__icon" aria-hidden="true">
+                👽
+              </span>
+            </div>
 
             {controller.state.participants.length === 0 ? (
-              <p className="hint">
-                Текущий Gateway пока не возвращает список
-                участников.
-              </p>
+              <div className="empty-state">
+                Gateway пока не вернул список участников.
+              </div>
             ) : (
               <ul className="participants">
-                {controller.state.participants.map((participant) => (
-                  <li key={participant.userId}>
-                    <span>{participant.userId}</span>
-                    <span>{participant.role}</span>
-                  </li>
-                ))}
+                {controller.state.participants.map(
+                  (participant, index) => (
+                    <li key={`${participant.displayName}-${index}`}>
+                      <span className="avatar" aria-hidden="true">
+                        {initial(participant.displayName)}
+                      </span>
+
+                      <span className="participant-info">
+                        <strong>{participant.displayName}</strong>
+                        <small>
+                          {participant.role === "host"
+                            ? "ВЕДУЩИЙ"
+                            : "УЧАСТНИК"}
+                        </small>
+                      </span>
+
+                      <span
+                        className={`presence ${
+                          participant.connected
+                            ? "presence--online"
+                            : "presence--offline"
+                        }`}
+                      >
+                        <span className="presence__dot" />
+                        {participant.connected
+                          ? "В СЕТИ"
+                          : "НЕ В СЕТИ"}
+                      </span>
+                    </li>
+                  )
+                )}
               </ul>
             )}
           </section>
 
           <section className="panel chat-panel">
-            <h2>Чат</h2>
+            <div className="panel-heading">
+              <span className="panel-heading__index">05</span>
+              <div>
+                <span className="eyebrow">РАДИОЭФИР</span>
+                <h2>Чат экипажа</h2>
+              </div>
+              <span className="panel-heading__icon" aria-hidden="true">
+                💬
+              </span>
+            </div>
+
+            {controller.chatGap !== null && (
+              <div className="error" role="status">
+                <span className="error__icon" aria-hidden="true">
+                  …
+                </span>
+                <div>
+                  <strong>ПОТЕРЯН СИГНАЛ</strong>
+                  <p>
+                    Ждём сообщение №{controller.chatGap}. Следующие
+                    уже в буфере.
+                  </p>
+                </div>
+              </div>
+            )}
 
             <div className="messages">
               {controller.messages.length === 0 ? (
-                <p className="hint">Сообщений пока нет.</p>
+                <div className="empty-state">
+                  Эфир тихий. Напишите первое сообщение.
+                </div>
               ) : (
-                controller.messages.map((message) => (
-                  <article
-                    key={message.messageId}
-                    className="message"
-                  >
-                    <header>
-                      <strong>{message.userId}</strong>
-                      <time dateTime={message.sentAt}>
-                        {new Date(message.sentAt).toLocaleTimeString()}
-                      </time>
-                    </header>
+                controller.messages.map((message) => {
+                  const isOwn =
+                    message.participantId ===
+                    bootstrap.session.displayName;
 
-                    <p>{message.text}</p>
-                  </article>
-                ))
+                  return (
+                    <article
+                      key={message.messageId}
+                      className={`message ${
+                        isOwn ? "message--own" : ""
+                      }`}
+                    >
+                      <span className="message__avatar" aria-hidden="true">
+                        {initial(message.participantId)}
+                      </span>
+
+                      <div className="message__body">
+                        <header>
+                          <strong>{message.participantId}</strong>
+                          <time dateTime={message.createdAt}>
+                            {formatTime(message.createdAt)}
+                          </time>
+                        </header>
+                        <p>{message.text}</p>
+                      </div>
+                    </article>
+                  );
+                })
               )}
             </div>
 
             <form className="chat-form" onSubmit={sendMessage}>
               <textarea
                 value={chatText}
-                placeholder="Сообщение"
+                placeholder="Сообщение в эфир..."
                 onChange={(event) =>
                   setChatText(event.target.value)
                 }
+                onKeyDown={handleChatKeyDown}
               />
 
               <button
-                className="button"
+                className="button button--send"
                 type="submit"
+                title="Отправить"
+                aria-label="Отправить сообщение"
                 disabled={
-                  controller.connectionStatus !== "connected"
+                  controller.connectionStatus !== "connected" ||
+                  controller.pendingChat
                 }
               >
-                Отправить
+                {controller.pendingChat ? "…" : "🚀"}
               </button>
             </form>
+
+            <p className="hint chat-hint">
+              Ctrl + Enter тоже отправляет сообщение.
+            </p>
           </section>
         </aside>
       </div>

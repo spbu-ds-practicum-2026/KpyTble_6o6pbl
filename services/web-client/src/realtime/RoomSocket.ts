@@ -1,44 +1,42 @@
 import {
   type ChatMessage,
-  type CommandAck,
+  type CommandConfirmMessage,
   type ConnectionStatus,
-  type GatewayEnvelope,
   type GatewayError,
-  type GatewayRoomState,
   type RoomState,
+  type ServerMessage,
   type Session,
-  type SessionAuthenticated,
+  normalizeChatMessage,
   normalizeRoomState
 } from "../api/protocol";
 
-interface RoomSocketCallbacks {
-  onStatusChange?: (status: ConnectionStatus) => void;
-  onAuthenticated?: (payload: SessionAuthenticated) => void;
-  onRoomState?: (state: RoomState) => void;
-  onChatMessage?: (message: ChatMessage) => void;
-  onCommandAck?: (ack: CommandAck) => void;
-  onError?: (error: GatewayError) => void;
-}
-
 interface PendingCommand {
   commandId: string;
-  envelope: GatewayEnvelope<Record<string, unknown>>;
+  type: string;
+  payload: Record<string, unknown>;
+}
+
+interface RoomSocketCallbacks {
+  onStatusChange?: (status: ConnectionStatus) => void;
+  onConnected?: () => void;
+  onRoomState?: (
+    state: RoomState,
+    initialMessageSeq?: number
+  ) => void;
+  onChatMessage?: (message: ChatMessage) => void;
+  onCommandConfirm?: (confirm: CommandConfirmMessage) => void;
+  onError?: (error: GatewayError) => void;
 }
 
 interface RoomSocketOptions {
   session: Session;
   callbacks?: RoomSocketCallbacks;
   retryPendingCommands?: boolean;
-  heartbeatIntervalMs?: number;
   heartbeatTimeoutMs?: number;
 }
 
 const MIN_RECONNECT_DELAY_MS = 1000;
 const MAX_RECONNECT_DELAY_MS = 15000;
-
-function createId(): string {
-  return crypto.randomUUID();
-}
 
 function getDefaultWsUrl(): string {
   const configuredUrl = import.meta.env.VITE_WS_URL?.trim();
@@ -55,30 +53,27 @@ export class RoomSocket {
   private readonly session: Session;
   private readonly callbacks: RoomSocketCallbacks;
   private readonly retryPendingCommands: boolean;
-  private readonly heartbeatIntervalMs: number;
   private readonly heartbeatTimeoutMs: number;
 
   private socket: WebSocket | null = null;
   private manuallyClosed = false;
-  private authenticated = false;
 
   private reconnectAttempt = 0;
   private reconnectTimer: number | null = null;
-  private heartbeatTimer: number | null = null;
-  private heartbeatTimeoutTimer: number | null = null;
+  private pigTimeoutTimer: number | null = null;
 
-  private readonly pendingCommands = new Map<string, PendingCommand>();
-  private readonly commandByRequestId = new Map<string, string>();
+  private readonly pendingCommands = new Map<
+    string,
+    PendingCommand
+  >();
 
   constructor(options: RoomSocketOptions) {
     this.session = options.session;
     this.callbacks = options.callbacks ?? {};
     this.retryPendingCommands =
-      options.retryPendingCommands ?? false;
-    this.heartbeatIntervalMs =
-      options.heartbeatIntervalMs ?? 15_000;
+      options.retryPendingCommands ?? true;
     this.heartbeatTimeoutMs =
-      options.heartbeatTimeoutMs ?? 8_000;
+      options.heartbeatTimeoutMs ?? 20_000;
   }
 
   connect(): void {
@@ -90,7 +85,6 @@ export class RoomSocket {
     }
 
     this.manuallyClosed = false;
-    this.authenticated = false;
 
     this.setStatus(
       this.reconnectAttempt === 0 ? "connecting" : "reconnecting"
@@ -104,15 +98,15 @@ export class RoomSocket {
         return;
       }
 
-      this.setStatus("authenticating");
+      this.reconnectAttempt = 0;
+      this.setStatus("connected");
+      this.resetPigWatchdog();
 
-      this.sendEnvelope({
-        type: "session.authenticate",
-        requestId: createId(),
-        payload: {
-          sessionToken: this.session.sessionToken
-        }
-      });
+      if (this.retryPendingCommands) {
+        this.resendPendingCommands();
+      }
+
+      this.callbacks.onConnected?.();
     });
 
     socket.addEventListener("message", (event) => {
@@ -136,8 +130,7 @@ export class RoomSocket {
       }
 
       this.socket = null;
-      this.authenticated = false;
-      this.stopHeartbeat();
+      this.clearPigWatchdog();
 
       if (this.manuallyClosed) {
         this.setStatus("disconnected");
@@ -150,10 +143,9 @@ export class RoomSocket {
 
   close(): void {
     this.manuallyClosed = true;
-    this.authenticated = false;
 
     this.clearReconnectTimer();
-    this.stopHeartbeat();
+    this.clearPigWatchdog();
 
     this.socket?.close(1000, "Client closed connection");
     this.socket = null;
@@ -161,88 +153,104 @@ export class RoomSocket {
     this.setStatus("disconnected");
   }
 
-  play(): string {
-    return this.sendCommand("playback.play");
+  playpause(): string {
+    return this.sendCommand("playpause", {});
   }
 
-  pause(): string {
-    return this.sendCommand("playback.pause");
+  nextVideo(): string {
+    return this.sendCommand("nextVideo", {});
   }
 
   seek(positionSeconds: number): string {
-    return this.sendCommand("playback.seek", {
-      positionSeconds
+    return this.sendCommand("seek", {
+      position_seconds: positionSeconds
     });
-  }
-
-  next(): string {
-    return this.sendCommand("playback.next");
   }
 
   addVideo(url: string): string {
-    return this.sendCommand("queue.add", { url });
+    return this.sendCommand("addVideo", { url });
   }
 
-  removeVideo(itemId: string): string {
-    return this.sendCommand("queue.remove", { itemId });
-  }
-
-  moveVideo(itemId: string, toIndex: number): string {
-    return this.sendCommand("queue.move", {
-      itemId,
-      toIndex
+  removeVideo(videoId: string): string {
+    return this.sendCommand("removeVideo", {
+      video_id: videoId
     });
   }
 
-  sendChatMessage(text: string): string {
-    return this.sendCommand("chat.send", { text });
+  changeQueue(videoIds: string[]): string {
+    return this.sendCommand("changeQueue", {
+      video_ids: videoIds
+    });
+  }
+
+  setSettings(mode: "host_only" | "all"): string {
+    return this.sendCommand("setSettings", { mode });
+  }
+
+  sendMessage(text: string): string {
+    return this.sendCommand("sendMessage", { text });
+  }
+
+  leaveRoom(): string {
+    return this.sendCommand("leaveRoom", {});
+  }
+
+  getState(): void {
+    this.sendRead("getState");
+  }
+
+  getChatSeq(): void {
+    this.sendRead("getChatSeq");
   }
 
   private sendCommand(
     type: string,
-    data: Record<string, unknown> = {}
+    payload: Record<string, unknown>
   ): string {
-    if (!this.authenticated) {
-      throw new Error("WebSocket is not authenticated");
-    }
-
-    const requestId = createId();
-    const commandId = createId();
-
-    const envelope: GatewayEnvelope<Record<string, unknown>> = {
-      type,
-      requestId,
-      payload: {
-        sessionToken: this.session.sessionToken,
-        commandId,
-        ...data
-      }
-    };
+    const commandId = crypto.randomUUID();
 
     this.pendingCommands.set(commandId, {
       commandId,
-      envelope
+      type,
+      payload
     });
 
-    this.commandByRequestId.set(requestId, commandId);
-    this.sendEnvelope(envelope);
+    try {
+      this.sendClientMessage({
+        type,
+        token: this.session.token,
+        commandId,
+        payload
+      });
+    } catch (error) {
+      this.pendingCommands.delete(commandId);
+      throw error;
+    }
 
     return commandId;
   }
 
-  private sendEnvelope(envelope: GatewayEnvelope): void {
+  private sendRead(type: string): void {
+    this.sendClientMessage({
+      type,
+      token: this.session.token,
+      payload: {}
+    });
+  }
+
+  private sendClientMessage(message: Record<string, unknown>): void {
     if (this.socket?.readyState !== WebSocket.OPEN) {
       throw new Error("WebSocket is not open");
     }
 
-    this.socket.send(JSON.stringify(envelope));
+    this.socket.send(JSON.stringify(message));
   }
 
   private handleMessage(rawMessage: unknown): void {
-    let envelope: GatewayEnvelope;
+    let message: ServerMessage;
 
     try {
-      envelope = JSON.parse(String(rawMessage)) as GatewayEnvelope;
+      message = JSON.parse(String(rawMessage)) as ServerMessage;
     } catch {
       this.callbacks.onError?.({
         code: "INVALID_SERVER_MESSAGE",
@@ -251,78 +259,54 @@ export class RoomSocket {
       return;
     }
 
-    switch (envelope.type) {
-      case "pong":
-        this.clearHeartbeatTimeout();
+    switch (message.type) {
+      case "pig":
+        this.handlePig(message.pigId);
         return;
 
-      case "session.authenticated":
-        this.handleAuthenticated(
-          envelope.payload as SessionAuthenticated
-        );
+      case "sendState":
+        this.handleSendState(message.state, message.initialMessageSeq);
         return;
 
-      case "room.state":
-        this.handleRoomState(envelope.payload as GatewayRoomState);
+      case "sendMessage":
+        this.handleSendMessage(message.message);
         return;
 
-      case "chat.message":
-        this.callbacks.onChatMessage?.(
-          envelope.payload as ChatMessage
-        );
-        return;
-
-      case "command.ack":
-        this.handleCommandAck(envelope.payload as CommandAck);
-        return;
-
-      case "error":
-        this.handleError(
-          envelope.requestId,
-          envelope.payload as GatewayError
-        );
+      case "commandConfirm":
+        this.handleCommandConfirm(message);
         return;
 
       default:
         this.callbacks.onError?.({
           code: "UNKNOWN_SERVER_MESSAGE",
-          message: `Неизвестный тип сообщения: ${envelope.type}`
+          message: "Gateway вернул неизвестный тип сообщения"
         });
     }
   }
 
-  private handleAuthenticated(
-    payload: SessionAuthenticated
-  ): void {
-    if (
-      payload.roomId !== this.session.roomId ||
-      payload.userId !== this.session.userId
-    ) {
-      this.callbacks.onError?.({
-        code: "SESSION_MISMATCH",
-        message: "Gateway вернул другую привязку сессии"
-      });
+  private handlePig(pigId: string): void {
+    this.clearPigWatchdog();
 
-      this.socket?.close(1008, "Session mismatch");
-      return;
+    if (typeof pigId === "string") {
+      try {
+        this.sendClientMessage({ type: "pong", pigId });
+      } catch {
+        this.socket?.close();
+        return;
+      }
     }
 
-    this.authenticated = true;
-    this.reconnectAttempt = 0;
-    this.setStatus("connected");
-    this.startHeartbeat();
-
-    this.callbacks.onAuthenticated?.(payload);
-
-    if (this.retryPendingCommands) {
-      this.resendPendingCommands();
-    }
+    this.resetPigWatchdog();
   }
 
-  private handleRoomState(payload: GatewayRoomState): void {
+  private handleSendState(
+    payload: Parameters<typeof normalizeRoomState>[0],
+    initialMessageSeq?: number
+  ): void {
     try {
       this.callbacks.onRoomState?.(
-        normalizeRoomState(payload)
+        normalizeRoomState(payload, this.session.roomId),
+        initialMessageSeq
       );
     } catch (error) {
       this.callbacks.onError?.({
@@ -335,105 +319,63 @@ export class RoomSocket {
     }
   }
 
-  private handleCommandAck(ack: CommandAck): void {
-    if (typeof ack.commandId === "string") {
-      this.pendingCommands.delete(ack.commandId);
-
-      for (const [requestId, commandId] of this.commandByRequestId) {
-        if (commandId === ack.commandId) {
-          this.commandByRequestId.delete(requestId);
-        }
-      }
+  private handleSendMessage(
+    payload: Parameters<typeof normalizeChatMessage>[0]
+  ): void {
+    try {
+      this.callbacks.onChatMessage?.(normalizeChatMessage(payload));
+    } catch (error) {
+      this.callbacks.onError?.({
+        code: "INVALID_CHAT_MESSAGE",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Некорректное сообщение чата"
+      });
     }
-
-    this.callbacks.onCommandAck?.(ack);
   }
 
-  private handleError(
-    requestId: string | null,
-    error: GatewayError
-  ): void {
-    if (requestId) {
-      const commandId = this.commandByRequestId.get(requestId);
-
-      if (commandId) {
-        // Отклонённую сервером команду повторять нельзя.
-        this.pendingCommands.delete(commandId);
-        this.commandByRequestId.delete(requestId);
-      }
+  private handleCommandConfirm(confirm: CommandConfirmMessage): void {
+    if (typeof confirm.commandId === "string") {
+      this.pendingCommands.delete(confirm.commandId);
     }
 
-    this.callbacks.onError?.(error);
+    this.callbacks.onCommandConfirm?.(confirm);
   }
 
   private resendPendingCommands(): void {
     for (const pending of this.pendingCommands.values()) {
-      const newRequestId = createId();
-
-      const repeatedEnvelope: GatewayEnvelope<Record<string, unknown>> = {
-        ...pending.envelope,
-        requestId: newRequestId
-      };
-
-      pending.envelope = repeatedEnvelope;
-      this.commandByRequestId.set(
-        newRequestId,
-        pending.commandId
-      );
-
-      this.sendEnvelope(repeatedEnvelope);
-    }
-  }
-
-  private startHeartbeat(): void {
-    this.stopHeartbeat();
-
-    this.heartbeatTimer = window.setInterval(() => {
-      if (
-        !this.authenticated ||
-        this.socket?.readyState !== WebSocket.OPEN
-      ) {
-        return;
-      }
-
-      const requestId = createId();
-
       try {
-        this.sendEnvelope({
-          type: "ping",
-          requestId,
-          payload: {}
+        this.sendClientMessage({
+          type: pending.type,
+          token: this.session.token,
+          commandId: pending.commandId,
+          payload: pending.payload
         });
-
-        this.clearHeartbeatTimeout();
-
-        this.heartbeatTimeoutTimer = window.setTimeout(() => {
-          this.callbacks.onError?.({
-            code: "HEARTBEAT_TIMEOUT",
-            message: "Gateway не ответил на heartbeat"
-          });
-
-          this.socket?.close(4000, "Heartbeat timeout");
-        }, this.heartbeatTimeoutMs);
       } catch {
-        this.socket?.close();
+        // Соединение уже закрыто — команда останется в очереди
+        // и будет отправлена после следующего переподключения.
       }
-    }, this.heartbeatIntervalMs);
-  }
-
-  private stopHeartbeat(): void {
-    if (this.heartbeatTimer !== null) {
-      window.clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = null;
     }
-
-    this.clearHeartbeatTimeout();
   }
 
-  private clearHeartbeatTimeout(): void {
-    if (this.heartbeatTimeoutTimer !== null) {
-      window.clearTimeout(this.heartbeatTimeoutTimer);
-      this.heartbeatTimeoutTimer = null;
+  private resetPigWatchdog(): void {
+    this.clearPigWatchdog();
+
+    this.pigTimeoutTimer = window.setTimeout(() => {
+      this.callbacks.onError?.({
+        code: "HEARTBEAT_TIMEOUT",
+        message: "Gateway не прислал pig вовремя"
+      });
+
+      this.socket?.close(4000, "Heartbeat timeout");
+    }, this.heartbeatTimeoutMs);
+  }
+
+  private clearPigWatchdog(): void {
+    if (this.pigTimeoutTimer !== null) {
+      window.clearTimeout(this.pigTimeoutTimer);
+      this.pigTimeoutTimer = null;
     }
   }
 
