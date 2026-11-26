@@ -18,6 +18,13 @@ export default defineConfig({
         target: gatewayUrl,
         changeOrigin: true,
         ws: true
+      },
+      // У Rutube нет CORS для браузерного fetch, поэтому названия тянем
+      // через локальный прокси Vite.
+      "/rutube-api": {
+        target: "https://rutube.ru/api",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/rutube-api/, "")
       }
     }
   }

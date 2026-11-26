@@ -16,6 +16,11 @@ export default defineConfig({
                 target: gatewayUrl,
                 changeOrigin: true,
                 ws: true
+            },
+            "/rutube-api": {
+                target: "https://rutube.ru/api",
+                changeOrigin: true,
+                rewrite: function (path) { return path.replace(/^\/rutube-api/, ""); }
             }
         }
     }

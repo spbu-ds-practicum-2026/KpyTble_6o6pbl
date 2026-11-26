@@ -17,18 +17,20 @@ export function loadSession(): Session | null {
     const value = JSON.parse(rawValue) as Partial<Session>;
 
     if (
-      typeof value.sessionToken !== "string" ||
-      typeof value.userId !== "string" ||
-      typeof value.roomId !== "string"
+      typeof value.token !== "string" ||
+      typeof value.roomId !== "string" ||
+      typeof value.displayName !== "string" ||
+      typeof value.role !== "string"
     ) {
       clearSession();
       return null;
     }
 
     return {
-      sessionToken: value.sessionToken,
-      userId: value.userId,
-      roomId: value.roomId
+      token: value.token,
+      roomId: value.roomId,
+      displayName: value.displayName,
+      role: value.role
     };
   } catch {
     clearSession();

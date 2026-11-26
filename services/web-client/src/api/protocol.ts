@@ -1,77 +1,143 @@
-export interface Session {
-  sessionToken: string;
-  userId: string;
-  roomId: string;
+export type ControlMode = "host_only" | "all";
+export type ParticipantRole = "host" | "member";
+
+/** Сетевые модели из api-contract.md (snake_case). */
+export interface ContractParticipant {
+  id?: string;
+  display_name: string;
+  role: ParticipantRole | string;
+  connected: boolean;
 }
 
-export interface QueueItem {
-  itemId: string;
+export interface ContractPlayback {
+  video_id: string | null;
+  position_seconds: number;
+  is_playing: boolean;
+}
+
+export interface ContractQueueItem {
+  id: string;
   url: string;
+  position: number;
 }
 
-export type ParticipantRole = "HOST" | "PARTICIPANT";
+export interface ContractRoomState {
+  status: string;
+  control_mode: ControlMode | string;
+  state_version: number;
+  current_video_id: string | null;
+  playback: ContractPlayback;
+  queue: ContractQueueItem[];
+  participants: ContractParticipant[];
+}
+
+export interface ContractRoomResponse {
+  room_id: string;
+  invite_code: string;
+  invite_link: string;
+  token: string;
+  participant: ContractParticipant;
+  state: ContractRoomState;
+}
+
+export interface ContractChatMessage {
+  message_id: string;
+  messageSeq: number;
+  participant_id: string;
+  text: string;
+  created_at: string;
+  // Не все бэкенды кладут сюда имя. Поддерживаем частые варианты полей,
+  // чтобы в чате не показывать голый UUID.
+  display_name?: string;
+  participant_name?: string;
+  author_name?: string;
+  displayName?: string;
+}
+
+export interface ContractError {
+  code: string;
+  message: string;
+}
+
+export interface CommandConfirmMessage {
+  type: "commandConfirm";
+  commandId?: string;
+  duplicate?: boolean;
+  state?: ContractRoomState;
+  message?: ContractChatMessage;
+  messageSeq?: number;
+  left?: boolean;
+  error?: ContractError;
+}
+
+export interface SendStateMessage {
+  type: "sendState";
+  initialMessageSeq?: number;
+  state: ContractRoomState;
+}
+
+export interface SendChatMessage {
+  type: "sendMessage";
+  message: ContractChatMessage;
+}
+
+export interface PigMessage {
+  type: "pig";
+  pigId: string;
+}
+
+export type ServerMessage =
+  | CommandConfirmMessage
+  | SendStateMessage
+  | SendChatMessage
+  | PigMessage;
+
+/** Внутренние модели клиента. */
+export interface QueueItem {
+  id: string;
+  url: string;
+  position: number;
+}
 
 export interface Participant {
-  userId: string;
+  id?: string;
+  displayName: string;
   role: ParticipantRole | string;
-  connected?: boolean;
-  joinedAt?: string;
+  connected: boolean;
 }
 
-export interface GatewayRoomState {
-  roomId: string;
-
-  // Текущее имя поля Gateway.
-  version?: number;
-
-  // Имя из ТР.
-  stateVersion?: number;
-
-  paused: boolean;
+export interface Playback {
+  videoId: string | null;
   positionSeconds: number;
-  currentVideo: QueueItem | null;
-  queue: QueueItem[];
-
-  // Будущие поля, необходимые по ТР.
-  positionUpdatedAt?: string;
-  serverTime?: string;
-  participants?: Participant[];
-  controlMode?: "HOST_ONLY" | "EVERYONE";
+  isPlaying: boolean;
 }
 
 export interface RoomState {
   roomId: string;
+  status: string;
+  controlMode: ControlMode | string;
   stateVersion: number;
-  paused: boolean;
-  positionSeconds: number;
-  currentVideo: QueueItem | null;
+  currentVideoId: string | null;
+  playback: Playback;
   queue: QueueItem[];
-  positionUpdatedAt?: string;
-  serverTime?: string;
   participants: Participant[];
-  controlMode?: "HOST_ONLY" | "EVERYONE";
+}
+
+export interface Session {
+  token: string;
+  roomId: string;
+  displayName: string;
+  participantId?: string;
+  role: ParticipantRole | string;
 }
 
 export interface ChatMessage {
   messageId: string;
-  roomId: string;
-  userId: string;
+  messageSeq: number;
+  participantId: string;
+  displayName?: string;
   text: string;
-  sentAt: string;
-
-  // Пока Gateway этого поля не возвращает.
-  messageSeq?: number;
-}
-
-export interface RoomBootstrap {
-  state: RoomState;
-  session: Session;
-}
-
-export interface GatewayEnvelope<T = unknown> {
-  type: string;
-  requestId: string | null;
-  payload: T;
+  createdAt: string;
 }
 
 export interface GatewayError {
@@ -79,44 +145,128 @@ export interface GatewayError {
   message: string;
 }
 
-export interface CommandAck {
-  commandId: string;
-  stateVersion?: number;
-  messageId?: string;
-}
+export interface RoomBootstrap {
+  session: Session;
+  state: RoomState;
+  inviteCode: string;
+  inviteLink: string;
 
-export interface SessionAuthenticated {
-  userId: string;
-  roomId: string;
+  // Локальный режим для просмотра интерфейса без Gateway.
+  demo?: boolean;
 }
 
 export type ConnectionStatus =
   | "idle"
   | "connecting"
-  | "authenticating"
   | "connected"
   | "reconnecting"
   | "disconnected";
 
 export function normalizeRoomState(
-  state: GatewayRoomState
+  state: ContractRoomState,
+  roomId: string
 ): RoomState {
-  const version = state.stateVersion ?? state.version;
-
-  if (version === undefined || !Number.isInteger(version)) {
+  if (!Number.isInteger(state.state_version)) {
     throw new Error("Gateway returned state without a valid version");
   }
 
+  const playback = state.playback ?? {
+    video_id: null,
+    position_seconds: 0,
+    is_playing: false
+  };
+
   return {
-    roomId: state.roomId,
-    stateVersion: version,
-    paused: state.paused,
-    positionSeconds: state.positionSeconds,
-    currentVideo: state.currentVideo,
-    queue: state.queue ?? [],
-    positionUpdatedAt: state.positionUpdatedAt,
-    serverTime: state.serverTime,
-    participants: state.participants ?? [],
-    controlMode: state.controlMode
+    roomId,
+    status: state.status ?? "active",
+    controlMode: state.control_mode ?? "host_only",
+    stateVersion: state.state_version,
+    currentVideoId: state.current_video_id ?? null,
+    playback: {
+      videoId: playback.video_id ?? null,
+      positionSeconds:
+        typeof playback.position_seconds === "number"
+          ? playback.position_seconds
+          : 0,
+      isPlaying: playback.is_playing === true
+    },
+    queue: Array.isArray(state.queue)
+      ? state.queue.map((item, index) => ({
+          id: item.id,
+          url: item.url,
+          position:
+            typeof item.position === "number" ? item.position : index
+        }))
+      : [],
+    participants: Array.isArray(state.participants)
+      ? state.participants.map((participant) => ({
+          id:
+            typeof participant.id === "string" && participant.id
+              ? participant.id
+              : undefined,
+          displayName: participant.display_name,
+          role: participant.role,
+          connected: participant.connected === true
+        }))
+      : []
+  };
+}
+
+export function normalizeChatMessage(
+  message: ContractChatMessage
+): ChatMessage {
+  if (
+    !message ||
+    typeof message.message_id !== "string" ||
+    !Number.isInteger(message.messageSeq) ||
+    typeof message.text !== "string"
+  ) {
+    throw new Error("Gateway returned an invalid chat message");
+  }
+
+  const displayName = [
+    message.display_name,
+    message.participant_name,
+    message.author_name,
+    message.displayName
+  ].find(
+    (value): value is string =>
+      typeof value === "string" && value.trim().length > 0
+  )?.trim();
+
+  return {
+    messageId: message.message_id,
+    messageSeq: message.messageSeq,
+    participantId: message.participant_id ?? "",
+    displayName,
+    text: message.text,
+    createdAt: message.created_at ?? ""
+  };
+}
+
+export function normalizeBootstrap(
+  response: ContractRoomResponse
+): RoomBootstrap {
+  if (
+    typeof response.room_id !== "string" ||
+    typeof response.token !== "string"
+  ) {
+    throw new Error("Gateway returned an invalid room response");
+  }
+
+  return {
+    session: {
+      token: response.token,
+      roomId: response.room_id,
+      displayName: response.participant?.display_name ?? "",
+      participantId:
+        typeof response.participant?.id === "string"
+          ? response.participant.id
+          : undefined,
+      role: response.participant?.role ?? "member"
+    },
+    state: normalizeRoomState(response.state, response.room_id),
+    inviteCode: response.invite_code ?? "",
+    inviteLink: response.invite_link ?? ""
   };
 }

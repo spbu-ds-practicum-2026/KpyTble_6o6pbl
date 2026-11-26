@@ -1,9 +1,9 @@
 import {
+  type ControlMode,
+  type ContractRoomResponse,
   type GatewayError,
-  type GatewayRoomState,
   type RoomBootstrap,
-  type Session,
-  normalizeRoomState
+  normalizeBootstrap
 } from "./protocol";
 
 const apiBaseUrl =
@@ -21,23 +21,34 @@ export class ApiError extends Error {
   }
 }
 
-interface JoinRoomResponse {
-  state: GatewayRoomState;
-  session: Session;
-}
+function extractError(body: unknown, status: number): GatewayError {
+  const candidate = (body ?? {}) as {
+    error?: { code?: unknown; message?: unknown };
+    code?: unknown;
+    message?: unknown;
+  };
 
-/**
- * Текущий POST /rooms возвращает State в развёрнутом виде
- * и поле session рядом с ним.
- */
-type CreateRoomResponse = GatewayRoomState & {
-  session: Session;
-};
+  const code =
+    typeof candidate.error?.code === "string"
+      ? candidate.error.code
+      : typeof candidate.code === "string"
+        ? candidate.code
+        : "HTTP_ERROR";
+
+  const message =
+    typeof candidate.error?.message === "string"
+      ? candidate.error.message
+      : typeof candidate.message === "string"
+        ? candidate.message
+        : `Gateway returned HTTP ${status}`;
+
+  return { code, message };
+}
 
 async function request<T>(
   path: string,
   init: RequestInit = {},
-  sessionToken?: string
+  token?: string
 ): Promise<T> {
   const headers = new Headers(init.headers);
 
@@ -47,8 +58,8 @@ async function request<T>(
     headers.set("Content-Type", "application/json");
   }
 
-  if (sessionToken) {
-    headers.set("Authorization", `Bearer ${sessionToken}`);
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
   }
 
   let response: Response;
@@ -73,17 +84,9 @@ async function request<T>(
     };
 
     try {
-      const body = (await response.json()) as Partial<GatewayError>;
-
-      if (typeof body.code === "string") {
-        error.code = body.code;
-      }
-
-      if (typeof body.message === "string") {
-        error.message = body.message;
-      }
+      error = extractError(await response.json(), response.status);
     } catch {
-      // Gateway пока не гарантирует единый JSON-формат всех ошибок.
+      // Сервер может вернуть не JSON — оставляем базовую ошибку.
     }
 
     throw new ApiError(response.status, error.code, error.message);
@@ -101,46 +104,35 @@ export async function checkHealth(): Promise<boolean> {
   return response.status === "ok";
 }
 
-export async function createRoom(): Promise<RoomBootstrap> {
-  const response = await request<CreateRoomResponse>("/rooms", {
-    method: "POST"
+export async function createRoom(
+  displayName: string,
+  controlMode: ControlMode
+): Promise<RoomBootstrap> {
+  const response = await request<ContractRoomResponse>("/rooms", {
+    method: "POST",
+    body: JSON.stringify({
+      display_name: displayName,
+      control_mode: controlMode
+    })
   });
 
-  const { session, ...state } = response;
-
-  return {
-    session,
-    state: normalizeRoomState(state)
-  };
+  return normalizeBootstrap(response);
 }
 
 export async function joinRoom(
-  roomId: string
+  inviteCode: string,
+  displayName: string
 ): Promise<RoomBootstrap> {
-  const response = await request<JoinRoomResponse>(
-    `/rooms/${encodeURIComponent(roomId)}/join`,
+  const response = await request<ContractRoomResponse>(
+    "/rooms/join",
     {
-      method: "POST"
+      method: "POST",
+      body: JSON.stringify({
+        invite_code: inviteCode,
+        display_name: displayName
+      })
     }
   );
 
-  return {
-    session: response.session,
-    state: normalizeRoomState(response.state)
-  };
-}
-
-export async function getRoomState(
-  roomId: string,
-  sessionToken: string
-) {
-  const response = await request<GatewayRoomState>(
-    `/rooms/${encodeURIComponent(roomId)}/state`,
-    {
-      method: "GET"
-    },
-    sessionToken
-  );
-
-  return normalizeRoomState(response);
+  return normalizeBootstrap(response);
 }
