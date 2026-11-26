@@ -18,9 +18,4 @@ def extract_session_token(request: Request) -> str | None:
         scheme, _, value = authorization.partition(" ")
         if scheme.lower() == "bearer" and value.strip():
             return value.strip()
-
-    header_token = request.headers.get("x-session-token")
-    if header_token and header_token.strip():
-        return header_token.strip()
-
     return None

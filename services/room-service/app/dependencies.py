@@ -9,10 +9,10 @@ from app.errors import ForbiddenError, UnauthorizedError
 from app.models import Participant
 from app.repository import load_participant_by_token_hash
 from app.runtime import Runtime
-from app.security import extract_session_token, hash_session_token
+from app.security import hash_session_token
 
 # Documents the Authorization header in OpenAPI/Swagger and enables the
-# "Authorize" button. The custom X-Session-Token header still works as fallback.
+# "Authorize" button.
 bearer_scheme = HTTPBearer(
     auto_error=False,
     description="Токен из POST /rooms или POST /rooms/join",
@@ -34,19 +34,15 @@ async def get_current_participant(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     session: AsyncSession = Depends(get_session),
 ) -> Participant:
-    token = (
-        credentials.credentials
-        if credentials is not None
-        else extract_session_token(request)
-    )
+    token = credentials.credentials if credentials is not None else None
     if not token:
-        raise UnauthorizedError("Токен сессии не передан", code="missing_token")
+        raise UnauthorizedError("Токен сессии не передан", code="unauthorized")
 
     participant = await load_participant_by_token_hash(
         session, hash_session_token(token)
     )
-    if participant is None or not participant.is_active:
-        raise UnauthorizedError("Недействительный токен сессии", code="invalid_token")
+    if participant is None:
+        raise UnauthorizedError("Недействительный токен сессии", code="unauthorized")
 
     return participant
 
@@ -56,5 +52,5 @@ async def get_room_participant(
     participant: Participant = Depends(get_current_participant),
 ) -> Participant:
     if participant.room_id != room_id:
-        raise ForbiddenError("Токен не принадлежит этой комнате", code="wrong_room")
+        raise ForbiddenError("Токен принадлежит другой комнате", code="wrong_room")
     return participant

@@ -9,6 +9,7 @@ _RUTUBE_RE = re.compile(
     r"(?:video|play/embed)/(?:private/)?([A-Za-z0-9_-]+)/?(?:\?.*)?$",
     re.IGNORECASE,
 )
+_INVITE_CODE_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 
 
 @dataclass(frozen=True)
@@ -27,3 +28,12 @@ def parse_rutube_url(url: str) -> RutubeVideo:
             code="invalid_video_url",
         )
     return RutubeVideo(video_id=match.group(1), url=candidate)
+
+
+def parse_invite_code(invite_code: str | None) -> str:
+    code = (invite_code or "").strip()
+    if not _INVITE_CODE_RE.fullmatch(code):
+        raise InvalidRequestError(
+            "Некорректный код приглашения", code="invalid_payload"
+        )
+    return code

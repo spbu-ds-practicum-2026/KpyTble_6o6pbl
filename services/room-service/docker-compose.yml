@@ -19,8 +19,11 @@ services:
     build: .
     environment:
       ROOM_DATABASE_URL: postgresql+asyncpg://room:room@db:5432/roomdb
+      ROOM_EVENT_PUBLISHER: http
+      ROOM_API_EVENTS_URL: http://192.168.0.13:6769/internal/room-events
+      ROOM_INVITE_BASE_URL: http://192.168.0.15:6661/rooms
+      ROOM_API_EVENTS_TIMEOUT_SECONDS: "2.0"
       ROOM_HOST_DISCONNECT_GRACE_SECONDS: "10"
-      ROOM_EVENT_PUBLISHER: logging
       ROOM_AUTO_CREATE_TABLES: "true"
     ports:
       - "8000:8000"

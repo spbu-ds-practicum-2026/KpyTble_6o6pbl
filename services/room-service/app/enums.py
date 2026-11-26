@@ -17,14 +17,12 @@ class ControlMode(StrEnum):
 
 
 class CommandType(StrEnum):
-    PLAY = "play"
-    PAUSE = "pause"
+    PLAYPAUSE = "playpause"
     SEEK = "seek"
     NEXT = "next"
 
     ADD_VIDEO = "add_video"
     REMOVE_VIDEO = "remove_video"
-    MOVE_VIDEO = "move_video"
+    CHANGE_QUEUE = "change_queue"
 
     SET_CONTROL_MODE = "set_control_mode"
-    CLOSE_ROOM = "close_room"

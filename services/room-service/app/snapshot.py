@@ -23,13 +23,14 @@ def current_position(room: Room, now: datetime | None = None) -> float:
 def build_room_state(room: Room, now: datetime | None = None) -> RoomState:
     now = ensure_utc(now or utcnow())
 
-    queue = sorted(room.videos, key=lambda video: (video.order_index, str(video.id)))
-    active_participants = [p for p in room.participants if p.is_active]
-    active_participants.sort(key=lambda p: (ensure_utc(p.joined_at), str(p.id)))
+    all_videos = sorted(room.videos, key=lambda video: video.order_index)
+
+    active_participants = sorted(
+        (p for p in room.participants if p.is_active),
+        key=lambda p: (ensure_utc(p.joined_at), str(p.id)),
+    )
 
     return RoomState(
-        room_id=room.id,
-        invite_code=room.invite_code,
         status=room.status,
         control_mode=room.control_mode,
         state_version=room.state_version,
@@ -38,15 +39,17 @@ def build_room_state(room: Room, now: datetime | None = None) -> RoomState:
             video_id=room.current_video_id,
             position_seconds=round(current_position(room, now), 3),
             is_playing=room.is_playing and room.current_video_id is not None,
-            updated_at=ensure_utc(room.position_updated_at),
-            server_time=now,
         ),
-        queue=[VideoOut.model_validate(video) for video in queue],
-        participants=[
-            ParticipantOut.model_validate(participant)
-            for participant in active_participants
+        queue=[
+            VideoOut(id=video.id, url=video.url, position=position)
+            for position, video in enumerate(all_videos)
         ],
-        created_at=ensure_utc(room.created_at),
+        participants=[
+            ParticipantOut(
+                display_name=p.display_name, role=p.role, connected=p.connected
+            )
+            for p in active_participants
+        ],
     )
 
 

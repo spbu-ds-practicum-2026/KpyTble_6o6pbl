@@ -19,7 +19,11 @@ from app.services.rooms import check_membership
 router = APIRouter(prefix="/internal", tags=["internal"])
 
 
-@router.get("/rooms/{room_id}/membership", response_model=MembershipResponse)
+@router.get(
+    "/rooms/{room_id}/membership",
+    response_model=MembershipResponse,
+    response_model_exclude_none=True,
+)
 async def membership(
     room_id: uuid.UUID,
     request: Request,

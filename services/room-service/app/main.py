@@ -2,6 +2,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 # Imported for side effects: registers tables in Base.metadata.
@@ -11,14 +12,16 @@ from app.api.rooms import router as rooms_router
 from app.config import Settings
 from app.database import Base, create_engine_and_session_factory
 from app.errors import DomainError
-from app.integrations.events import build_event_publisher
+from app.integrations.events import EventPublisher, build_event_publisher
 from app.runtime import RoomLockRegistry, Runtime
 from app.services.handover import HandoverManager
 
 logging.basicConfig(level=logging.INFO)
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None, events: EventPublisher | None = None
+) -> FastAPI:
     settings = settings or Settings()
 
     @asynccontextmanager
@@ -29,14 +32,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             async with engine.begin() as connection:
                 await connection.run_sync(Base.metadata.create_all)
 
-        events = build_event_publisher(settings)
+        publisher = events or build_event_publisher(settings)
         locks = RoomLockRegistry()
-        handover = HandoverManager(session_factory, locks, events, settings)
+        handover = HandoverManager(session_factory, locks, publisher, settings)
 
         app.state.runtime = Runtime(
             settings=settings,
             session_factory=session_factory,
-            events=events,
+            events=publisher,
             locks=locks,
             handover=handover,
         )
@@ -45,6 +48,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield
         finally:
             await handover.shutdown()
+            await publisher.aclose()
             await engine.dispose()
 
     app = FastAPI(
@@ -61,6 +65,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "error": {
                     "code": exc.code,
                     "message": exc.message,
+                }
+            },
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error_handler(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": {
+                    "code": "invalid_payload",
+                    "message": "Некорректные параметры запроса",
                 }
             },
         )
