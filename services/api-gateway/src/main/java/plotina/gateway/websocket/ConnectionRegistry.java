@@ -34,6 +34,7 @@ public class ConnectionRegistry {
     volatile String token;
     volatile String roomId;
     volatile boolean ready;
+    volatile boolean chatReady;
     volatile String pigId;
     volatile long pigSentAt;
     final long openedAt = System.currentTimeMillis();

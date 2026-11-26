@@ -30,7 +30,10 @@ public class ServiceClient {
     this.roomUrl = roomUrl.replaceAll("/+$", "");
     this.chatUrl = chatUrl.replaceAll("/+$", "");
     this.timeout = Duration.ofMillis(timeoutMs);
-    this.client = HttpClient.newBuilder().connectTimeout(timeout).build();
+    // Internal services expose HTTP/1.1; avoid an h2c upgrade on plain HTTP.
+    this.client = HttpClient.newBuilder()
+        .version(HttpClient.Version.HTTP_1_1)
+        .connectTimeout(timeout).build();
   }
 
   public JsonNode room(String method, String path, String token, JsonNode body) {

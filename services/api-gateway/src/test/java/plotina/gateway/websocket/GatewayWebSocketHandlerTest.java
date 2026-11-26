@@ -87,6 +87,7 @@ class GatewayWebSocketHandlerTest {
     verify(socket, never()).sendMessage(any());
     connection.initialSeq = 42;
     connection.ready = true;
+    connection.chatReady = true;
     broadcaster.broadcast("a", old);
     verify(socket, never()).sendMessage(any());
     broadcaster.broadcast("a", mapper.readTree("{\"type\":\"sendMessage\",\"message\":{\"messageSeq\":43}}"));
@@ -131,5 +132,37 @@ class GatewayWebSocketHandlerTest {
     verify(socket, times(2)).sendMessage(capture.capture());
     assertEquals("commandConfirm", mapper.readTree(capture.getAllValues().getFirst().getPayload()).path("type").asText());
     verify(services, never()).chat(any(), any(), any(), any());
+  }
+
+  @Test void reconnectWithoutChatStillReceivesRoomUpdatesAndRecoversRealChatBaseline() throws Exception {
+    sessions.remember("token", "room-1");
+    when(services.room("GET", "/rooms/room-1", "token", null))
+        .thenReturn(mapper.readTree("{\"state_version\":10}"));
+    when(services.chat("GET", "/rooms/room-1/messages/seq", "token", null))
+        .thenThrow(new GatewayException(502, "service_unavailable", "Chat unavailable"));
+    handler.handleTextMessage(socket, new TextMessage(
+        "{\"type\":\"getState\",\"token\":\"token\",\"payload\":{}}"));
+    assertTrue(registry.get("one").ready);
+    assertFalse(registry.get("one").chatReady);
+    var capture = ArgumentCaptor.forClass(TextMessage.class);
+    verify(socket).sendMessage(capture.capture());
+    var initial = mapper.readTree(capture.getValue().getPayload());
+    assertEquals("sendState", initial.path("type").asText());
+    assertFalse(initial.has("initialMessageSeq"));
+    clearInvocations(socket);
+    handler.reconcile();
+    verify(socket).sendMessage(any());
+    when(services.room(eq("POST"), eq("/rooms/room-1/commands"), eq("token"), any()))
+        .thenReturn(mapper.readTree("{\"command_id\":\"cmd-1\",\"duplicate\":false,\"state\":{\"state_version\":11}}"));
+    handler.handleTextMessage(socket, new TextMessage(
+        "{\"type\":\"playpause\",\"commandId\":\"cmd-1\",\"token\":\"token\",\"payload\":{}}"));
+    verify(services).room(eq("POST"), eq("/rooms/room-1/commands"), eq("token"), any());
+    doReturn(mapper.readTree("{\"messageSeq\":57}"))
+        .when(services).chat("GET", "/rooms/room-1/messages/seq", "token", null);
+    clearInvocations(socket);
+    handler.recoverChats();
+    assertTrue(registry.get("one").chatReady);
+    verify(socket).sendMessage(capture.capture());
+    assertEquals(57, mapper.readTree(capture.getValue().getPayload()).path("initialMessageSeq").asLong());
   }
 }

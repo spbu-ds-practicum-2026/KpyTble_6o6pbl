@@ -26,7 +26,8 @@ public class RoomBroadcaster {
           continue;
         }
         try {
-          if (!connection.ready) {
+          if (!connection.ready || (!connection.chatReady
+              && "sendMessage".equals(message.path("type").asText()))) {
             // Bounded initialization buffer; do not hold this lock during HTTP requests.
             if (connection.pending.size() >= 256) {
               connection.socket.close(CloseStatus.SESSION_NOT_RELIABLE);
@@ -46,6 +47,7 @@ public class RoomBroadcaster {
 
   static boolean isOldChat(ConnectionRegistry.Connection connection, JsonNode message) {
     return "sendMessage".equals(message.path("type").asText())
-        && message.path("message").path("messageSeq").asLong() <= connection.initialSeq;
+        && (!connection.chatReady
+            || message.path("message").path("messageSeq").asLong() <= connection.initialSeq);
   }
 }

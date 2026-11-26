@@ -90,6 +90,9 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
       String room = sessions.room(token);
       boolean initialized = connection.ready;
       if (!initialized) initialize(connection, room, token);
+      else if (!connection.chatReady && ("getChatSeq".equals(type) || "sendMessage".equals(type))) {
+        recoverChat(connection);
+      }
       String path = "/rooms/" + room;
       if ("getState".equals(type)) {
         if (initialized) sender.send(socket, event("sendState").set("state", services.room("GET", path, token, null)));
@@ -144,14 +147,21 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
     try {
       // Register before taking the chat baseline so concurrent broadcasts are buffered.
       JsonNode state = services.room("GET", "/rooms/" + room, token, null);
-      JsonNode seq = services.chat("GET", "/rooms/" + room + "/messages/seq", token, null);
-      if (!seq.path("messageSeq").isIntegralNumber()) {
-        throw new GatewayException(502, "bad_gateway", "Invalid chat sequence response");
+      JsonNode seq = null;
+      try {
+        seq = chatSequence(room, token);
+      } catch (GatewayException exception) {
+        log.warn("Chat initialization unavailable for connection {}; room synchronization remains active",
+            connection.socket.getId());
       }
       synchronized (connection) {
-        connection.initialSeq = seq.path("messageSeq").asLong();
-        sender.send(connection.socket, event("sendState").put("initialMessageSeq", connection.initialSeq)
-            .set("state", state));
+        ObjectNode initial = event("sendState").set("state", state);
+        if (seq != null) {
+          connection.initialSeq = seq.path("messageSeq").asLong();
+          initial.put("initialMessageSeq", connection.initialSeq);
+        }
+        sender.send(connection.socket, initial);
+        connection.chatReady = seq != null;
         for (JsonNode pending : connection.pending) {
           if (!RoomBroadcaster.isOldChat(connection, pending)) sender.send(connection.socket, pending);
         }
@@ -165,6 +175,42 @@ public class GatewayWebSocketHandler extends TextWebSocketHandler {
         connection.pending.clear();
       }
       throw exception;
+    }
+  }
+
+  private JsonNode chatSequence(String room, String token) {
+    JsonNode seq = services.chat("GET", "/rooms/" + room + "/messages/seq", token, null);
+    if (!seq.path("messageSeq").isIntegralNumber() || seq.path("messageSeq").asLong() < 0) {
+      throw new GatewayException(502, "bad_gateway", "Invalid chat sequence response");
+    }
+    return seq;
+  }
+
+  private void recoverChat(ConnectionRegistry.Connection connection) throws IOException {
+    JsonNode seq = chatSequence(connection.roomId, connection.token);
+    JsonNode state = services.room("GET", "/rooms/" + connection.roomId, connection.token, null);
+    synchronized (connection) {
+      if (connection.chatReady || registry.get(connection.socket.getId()) != connection) return;
+      connection.initialSeq = seq.path("messageSeq").asLong();
+      sender.send(connection.socket, event("sendState").put("initialMessageSeq", connection.initialSeq)
+          .set("state", state));
+      connection.chatReady = true;
+      for (JsonNode pending : connection.pending) {
+        if (!RoomBroadcaster.isOldChat(connection, pending)) sender.send(connection.socket, pending);
+      }
+      connection.pending.clear();
+    }
+  }
+
+  @Scheduled(fixedDelayString = "${gateway.chat-recovery-ms:5000}")
+  public void recoverChats() {
+    for (var connection : registry.all()) {
+      if (!connection.ready || connection.chatReady) continue;
+      try {
+        recoverChat(connection);
+      } catch (GatewayException | IOException exception) {
+        // Retry later, without interrupting room commands or state broadcasts.
+      }
     }
   }
 
