@@ -1,7 +1,7 @@
 import pytest
 
 from app.errors import InvalidRequestError
-from app.urls import parse_rutube_url
+from app.urls import parse_invite_code, parse_rutube_url
 
 
 @pytest.mark.parametrize(
@@ -35,3 +35,30 @@ def test_accepts_rutube_links(url, video_id):
 def test_rejects_unknown_links(url):
     with pytest.raises(InvalidRequestError):
         parse_rutube_url(url)
+
+
+@pytest.mark.parametrize(
+    ("invite_code", "expected"),
+    [
+        ("AbCdEf_12345", "AbCdEf_12345"),
+        ("  AbCdEf_12345  ", "AbCdEf_12345"),
+        ("a", "a"),
+    ],
+)
+def test_accepts_invite_codes(invite_code, expected):
+    assert parse_invite_code(invite_code) == expected
+
+
+@pytest.mark.parametrize(
+    "invite_code",
+    [
+        None,
+        "",
+        "bad code",
+        "http://localhost:3000/rooms/AbCdEf_12345",
+        "a" * 33,
+    ],
+)
+def test_rejects_invalid_invite_codes(invite_code):
+    with pytest.raises(InvalidRequestError):
+        parse_invite_code(invite_code)

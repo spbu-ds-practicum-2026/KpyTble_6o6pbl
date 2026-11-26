@@ -7,9 +7,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
 from app.enums import ParticipantRole, RoomStatus
-from app.integrations.events import EventPublisher
+from app.integrations.events import EventPublisher, publish_state_change
 from app.models import Participant, Room
 from app.repository import load_room
+from app.schemas import RoomState
 from app.snapshot import build_room_state
 from app.timeutils import ensure_utc, utcnow
 
@@ -100,9 +101,9 @@ class HandoverManager:
     ) -> None:
         try:
             await asyncio.sleep(self._grace_seconds)
-            event = await self.process(room_id, participant_id, connection_generation)
-            if event is not None:
-                await self._events.publish(event)
+            state = await self.process(room_id, participant_id, connection_generation)
+            if state is not None:
+                await publish_state_change(self._events, room_id, state, "host_changed")
         except asyncio.CancelledError:
             return
         except Exception:
@@ -121,7 +122,7 @@ class HandoverManager:
         room_id: uuid.UUID,
         participant_id: uuid.UUID,
         connection_generation: int,
-    ) -> dict | None:
+    ) -> RoomState | None:
         async with self._locks.for_room(room_id), self._session_factory() as session:
             room = await load_room(session, room_id)
             if room is None or room.status != RoomStatus.ACTIVE:
@@ -151,13 +152,6 @@ class HandoverManager:
             successor.role = ParticipantRole.HOST
             room.state_version += 1
 
-            snapshot = build_room_state(room, utcnow()).model_dump(mode="json")
+            state = build_room_state(room, utcnow())
             await session.commit()
-
-            return {
-                "type": "host_changed",
-                "room_id": str(room_id),
-                "participant_id": str(successor.id),
-                "state_version": room.state_version,
-                "state": snapshot,
-            }
+            return state

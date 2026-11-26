@@ -123,7 +123,6 @@ class Video(Base):
         ForeignKey("rooms.id", ondelete="CASCADE"), index=True, nullable=False
     )
     url: Mapped[str] = mapped_column(String(2048), nullable=False)
-    title: Mapped[str | None] = mapped_column(String(500), nullable=True)
     order_index: Mapped[int] = mapped_column(Integer, nullable=False)
     added_by_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

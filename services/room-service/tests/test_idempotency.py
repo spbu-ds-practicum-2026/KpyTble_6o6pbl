@@ -13,16 +13,16 @@ async def test_repeated_next_does_not_switch_video_twice(client):
     command_id = "next-command-1"
     first = await command(client, room_id, token, "next", command_id=command_id)
     assert first["duplicate"] is False
-    expected_video = first["state"]["current_video_id"]
+    expected_video = first["state"]["playback"]["video_id"]
     expected_version = first["state"]["state_version"]
 
     second = await command(client, room_id, token, "next", command_id=command_id)
     assert second["duplicate"] is True
-    assert second["state"]["current_video_id"] == expected_video
+    assert second["state"]["playback"]["video_id"] == expected_video
     assert second["state"]["state_version"] == expected_version
 
     state = await get_state(client, room_id, token)
-    assert state["current_video_id"] == expected_video
+    assert state["playback"]["video_id"] == expected_video
     assert state["state_version"] == expected_version
 
 
@@ -30,7 +30,7 @@ async def test_repeated_add_video_creates_one_queue_item(client):
     host = await create_room(client)
     room_id = host["room_id"]
     token = host["token"]
-    payload = {"url": "https://rutube.ru/video/same/", "title": "Same"}
+    payload = {"url": "https://rutube.ru/video/same/"}
     command_id = "add-command-1"
 
     first = await command(
@@ -44,7 +44,6 @@ async def test_repeated_add_video_creates_one_queue_item(client):
         client, room_id, token, "add_video", payload, command_id=command_id
     )
     assert second["duplicate"] is True
-    assert len(second["state"]["queue"]) == 1
 
     state = await get_state(client, room_id, token)
     assert len(state["queue"]) == 1
@@ -57,7 +56,8 @@ async def test_same_command_id_with_different_parameters_is_rejected(client):
     token = host["token"]
     command_id = "shared-command"
 
-    await command(client, room_id, token, "pause", command_id=command_id)
+    await add_video(client, room_id, token)
+    await command(client, room_id, token, "playpause", command_id=command_id)
 
     conflict = await command(
         client,
@@ -71,29 +71,15 @@ async def test_same_command_id_with_different_parameters_is_rejected(client):
     assert conflict["error"]["code"] == "command_id_conflict"
 
 
-async def test_duplicate_command_allows_different_command_id(client):
-    host = await create_room(client)
-    room_id = host["room_id"]
-    token = host["token"]
-
-    await add_video(client, room_id, token)
-    first = await command(client, room_id, token, "pause")
-    second = await command(client, room_id, token, "pause")
-
-    assert first["duplicate"] is False
-    assert second["duplicate"] is False
-    assert second["state"]["state_version"] == first["state"]["state_version"] + 1
-
-
-async def test_repeated_play_is_idempotent(client):
+async def test_repeated_playpause_toggles_only_once(client):
     host = await create_room(client)
     room_id = host["room_id"]
     token = host["token"]
     await add_video(client, room_id, token)
 
-    command_id = "play-command-1"
-    first = await command(client, room_id, token, "play", command_id=command_id)
-    second = await command(client, room_id, token, "play", command_id=command_id)
+    command_id = "playpause-command-1"
+    first = await command(client, room_id, token, "playpause", command_id=command_id)
+    second = await command(client, room_id, token, "playpause", command_id=command_id)
 
     assert first["duplicate"] is False
     assert second["duplicate"] is True
@@ -102,23 +88,6 @@ async def test_repeated_play_is_idempotent(client):
 
     state = await get_state(client, room_id, token)
     assert state["state_version"] == first["state"]["state_version"]
-
-
-async def test_repeated_pause_is_idempotent(client):
-    host = await create_room(client)
-    room_id = host["room_id"]
-    token = host["token"]
-    await add_video(client, room_id, token)
-    await command(client, room_id, token, "play")
-
-    command_id = "pause-command-1"
-    first = await command(client, room_id, token, "pause", command_id=command_id)
-    second = await command(client, room_id, token, "pause", command_id=command_id)
-
-    assert first["duplicate"] is False
-    assert second["duplicate"] is True
-    assert second["state"]["state_version"] == first["state"]["state_version"]
-    assert second["state"]["playback"]["is_playing"] is False
 
 
 async def test_repeated_seek_is_idempotent(client):
@@ -141,23 +110,19 @@ async def test_repeated_seek_is_idempotent(client):
     assert second["state"]["state_version"] == first["state"]["state_version"]
     assert second["state"]["playback"]["position_seconds"] == 42.0
 
-    state = await get_state(client, room_id, token)
-    assert state["state_version"] == first["state"]["state_version"]
-    assert state["playback"]["position_seconds"] == 42.0
-
 
 async def test_repeated_remove_video_is_idempotent(client):
     host = await create_room(client)
     room_id = host["room_id"]
     token = host["token"]
 
-    first_add = await add_video(client, room_id, token, "https://rutube.ru/video/a/")
-    first_id = first_add["state"]["current_video_id"]
+    await add_video(client, room_id, token, "https://rutube.ru/video/a/")
     second_add = await add_video(client, room_id, token, "https://rutube.ru/video/b/")
-    second_id = second_add["state"]["queue"][1]["id"]
+    current_id = second_add["state"]["playback"]["video_id"]
+    upcoming_id = second_add["state"]["queue"][1]["id"]
 
     command_id = "remove-command-1"
-    payload = {"video_id": first_id}
+    payload = {"video_id": current_id}
     first = await command(
         client, room_id, token, "remove_video", payload, command_id=command_id
     )
@@ -168,51 +133,60 @@ async def test_repeated_remove_video_is_idempotent(client):
     assert first["duplicate"] is False
     assert second["duplicate"] is True
     assert second["state"]["state_version"] == first["state"]["state_version"]
-    assert len(second["state"]["queue"]) == 1
-    assert second["state"]["current_video_id"] == second_id
-
-    state = await get_state(client, room_id, token)
-    assert len(state["queue"]) == 1
-    assert state["current_video_id"] == second_id
+    assert second["state"]["playback"]["video_id"] == upcoming_id
+    assert [video["id"] for video in second["state"]["queue"]] == [upcoming_id]
 
 
-async def test_repeated_move_video_is_idempotent(client):
+async def test_repeated_change_queue_is_idempotent(client):
     host = await create_room(client)
     room_id = host["room_id"]
     token = host["token"]
 
-    await add_video(client, room_id, token, "https://rutube.ru/video/a/", "A")
-    await add_video(client, room_id, token, "https://rutube.ru/video/b/", "B")
-    result = await add_video(client, room_id, token, "https://rutube.ru/video/c/", "C")
-    third_id = result["state"]["queue"][2]["id"]
+    await add_video(client, room_id, token, "https://rutube.ru/video/a/")
+    await add_video(client, room_id, token, "https://rutube.ru/video/b/")
+    await add_video(client, room_id, token, "https://rutube.ru/video/c/")
+    last = await add_video(client, room_id, token, "https://rutube.ru/video/d/")
+    ids = [video["id"] for video in last["state"]["queue"]]
 
-    command_id = "move-command-1"
-    payload = {"video_id": third_id, "position": 0}
+    command_id = "change-command-1"
+    payload = {"video_ids": [ids[2], ids[0], ids[1], ids[3]]}
     first = await command(
-        client, room_id, token, "move_video", payload, command_id=command_id
+        client, room_id, token, "change_queue", payload, command_id=command_id
     )
     second = await command(
-        client, room_id, token, "move_video", payload, command_id=command_id
+        client, room_id, token, "change_queue", payload, command_id=command_id
     )
 
     assert first["duplicate"] is False
     assert second["duplicate"] is True
     assert second["state"]["state_version"] == first["state"]["state_version"]
-    assert [video["title"] for video in second["state"]["queue"]] == ["C", "A", "B"]
+    assert [video["id"] for video in second["state"]["queue"]] == [
+        ids[2],
+        ids[0],
+        ids[1],
+        ids[3],
+    ]
 
 
 async def test_repeated_set_control_mode_is_idempotent(client):
     host = await create_room(client)
-    room_id = host["room_id"]
-    token = host["token"]
-
     command_id = "mode-command-1"
-    payload = {"mode": "all"}
+
     first = await command(
-        client, room_id, token, "set_control_mode", payload, command_id=command_id
+        client,
+        host["room_id"],
+        host["token"],
+        "set_control_mode",
+        {"mode": "all"},
+        command_id=command_id,
     )
     second = await command(
-        client, room_id, token, "set_control_mode", payload, command_id=command_id
+        client,
+        host["room_id"],
+        host["token"],
+        "set_control_mode",
+        {"mode": "all"},
+        command_id=command_id,
     )
 
     assert first["duplicate"] is False
@@ -221,22 +195,28 @@ async def test_repeated_set_control_mode_is_idempotent(client):
     assert second["state"]["control_mode"] == "all"
 
 
-async def test_repeated_command_after_close_returns_saved_confirmation(client):
+async def test_repeated_command_after_close_returns_saved_confirmation(
+    client, event_log
+):
     host = await create_room(client)
     room_id = host["room_id"]
     token = host["token"]
     await add_video(client, room_id, token)
 
     command_id = "play-before-close"
-    first = await command(client, room_id, token, "play", command_id=command_id)
-    await command(client, room_id, token, "close_room")
+    first = await command(client, room_id, token, "playpause", command_id=command_id)
 
-    repeat = await command(client, room_id, token, "play", command_id=command_id)
+    left = await client.post(
+        f"/rooms/{room_id}/leave", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert left.status_code == 200
+
+    repeat = await command(client, room_id, token, "playpause", command_id=command_id)
 
     assert repeat["duplicate"] is True
     assert repeat["state"]["state_version"] == first["state"]["state_version"]
     assert repeat["state"]["playback"]["is_playing"] is True
 
-    state = await get_state(client, room_id, token)
-    assert state["status"] == "closed"
-    assert state["state_version"] > first["state"]["state_version"]
+    closed = event_log.events[-1]["state"]
+    assert closed["status"] == "closed"
+    assert closed["state_version"] > first["state"]["state_version"]

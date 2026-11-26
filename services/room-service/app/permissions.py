@@ -1,25 +1,19 @@
 from app.enums import CommandType, ControlMode, ParticipantRole
-from app.errors import ForbiddenError
+from app.errors import ForbiddenError, InvalidRequestError
 from app.models import Participant, Room
 
 PLAYBACK_AND_QUEUE_COMMANDS = frozenset(
     {
-        CommandType.PLAY,
-        CommandType.PAUSE,
+        CommandType.PLAYPAUSE,
         CommandType.SEEK,
         CommandType.NEXT,
         CommandType.ADD_VIDEO,
         CommandType.REMOVE_VIDEO,
-        CommandType.MOVE_VIDEO,
+        CommandType.CHANGE_QUEUE,
     }
 )
 
-HOST_ONLY_COMMANDS = frozenset(
-    {
-        CommandType.SET_CONTROL_MODE,
-        CommandType.CLOSE_ROOM,
-    }
-)
+HOST_ONLY_COMMANDS = frozenset({CommandType.SET_CONTROL_MODE})
 
 
 def ensure_can_execute(
@@ -45,4 +39,4 @@ def ensure_can_execute(
             )
         return
 
-    raise ForbiddenError("Неизвестная команда", code="unknown_command")
+    raise InvalidRequestError("Неизвестная команда", code="invalid_payload")

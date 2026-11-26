@@ -34,7 +34,7 @@ async def create_room(
     return await rooms.create_room(runtime, session, request)
 
 
-@router.post("/join", response_model=JoinRoomResponse)
+@router.post("/join", response_model=JoinRoomResponse, status_code=201)
 async def join_room(
     request: JoinRoomRequest,
     runtime: Runtime = Depends(get_runtime),
@@ -49,7 +49,7 @@ async def get_room(
     participant: Participant = Depends(get_room_participant),
     session: AsyncSession = Depends(get_session),
 ) -> RoomState:
-    return await rooms.get_room_state(session, room_id)
+    return await rooms.get_room_state(session, room_id, participant.id)
 
 
 @router.post("/{room_id}/commands", response_model=CommandResponse)
