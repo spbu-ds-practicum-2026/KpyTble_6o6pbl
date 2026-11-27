@@ -1,134 +1,164 @@
-# API Gateway
+# API Gateway Plotina
 
-Предварительный контракт текущего каркаса. **Backend-вызовы пока работают через заглушки, не через HTTP.** Адреса внутренних сервисов и их сетевые JSON-контракты ещё согласуются. ТР не заменяется этим документом.
+Gateway реализует клиентские REST/WebSocket сообщения и внутренние HTTP-вызовы
+по итоговому `api-contract.md`. Room и Chat вызываются по HTTP, production-заглушек нет.
+Изменения состояния, права, валидация Rutube, транзакции и дедупликация — ответственность сервисов.
 
-## Запуск
+## Запуск и тесты
 
-Из `services/api-gateway/`, с JDK 21:
+### Проверка с сервисами на других ноутбуках
+
+Из `services/api-gateway` один раз скопируйте шаблон (если локального файла ещё нет):
+
+```bash
+cp config/local.properties.example config/local.properties
+```
+
+Меняйте только **`config/local.properties`**, например:
+
+```properties
+server.port=6767
+gateway.room-service-url=http://192.168.1.11:8000
+gateway.chat-service-url=http://192.168.1.12:8001
+gateway.allowed-origins=http://192.168.1.13:3000
+```
+
+Последняя строка — origin фронтенда (откуда браузер загрузил страницу), без пути и
+завершающего `/`. При необходимости перечислите несколько через запятую.
+Он разрешается одновременно для REST CORS и WebSocket. Это не адрес для вызовов
+Gateway → Frontend. Для страницы Gateway `/ws-test.html` настройка не нужна.
+
+Запуск из этой же папки:
 
 ```bash
 ./gradlew bootRun
-./gradlew test
 ```
 
-HTTP: `http://localhost:8080`. WebSocket: `ws://localhost:8080/ws`.
-Для ручной проверки: `http://localhost:8080/ws-test.html`, затем консоль браузера.
+Файл автоматически читается при запуске, без дополнительных профилей/аргументов,
+и исключён из Git. После изменения адресов перезапустите Gateway.
+При запуске JAR рабочая папка также должна содержать `config/local.properties`.
+Без локального файла работают настройки по умолчанию ниже. Явные аргументы командной
+строки, например `--server.port=8080`, имеют приоритет над локальным файлом.
 
-## Форматы данных
+Проверка с другого ноутбука:
 
-В таблицах используются сокращения:
+```bash
+curl http://IP_GATEWAY:6767/health
+```
 
-| Объект | Поля |
-|---|---|
-| `Session` | `sessionToken: string`, `userId: string`, `roomId: string` |
-| `State` | `roomId: string`, `version: integer`, `paused: boolean`, `positionSeconds: number`, `currentVideo: Item \| null`, `queue: Item[]` |
-| `Item` | `itemId: string`, `url: string` |
-| `ChatMessage` | `messageId: string`, `roomId: string`, `userId: string`, `text: string`, `sentAt: string` |
+Затем откройте `http://IP_GATEWAY:6767/ws-test.html`: создайте комнату, подключите
+WebSocket, отправьте `getState` и `getChatSeq`. Создание проверяет HTTP-соединение
+с Room; начальный снимок WebSocket проверяет и Room, и Chat. `/health` проверяет
+только сам Gateway, а не доступность внутренних сервисов.
+Подключите вторую вкладку как нового участника через «Войти» и проверьте рассылки.
+Все ноутбуки должны быть доступны друг другу в сети, сервисы слушать сетевой
+интерфейс (обычно `0.0.0.0`), а firewall разрешать выбранные порты.
 
-Позиция — в секундах. `sentAt` — время в ISO 8601. Токен сессии — секрет, не передаётся другим участникам. Модели предварительные, в частности пока нет списка участников и временной опоры позиции плеера.
+Нужен JDK 21:
 
-## Client ↔ Gateway
+```bash
+./gradlew test
+ROOM_SERVICE_URL=http://localhost:8000 CHAT_SERVICE_URL=http://localhost:8001 ./gradlew bootRun
+```
 
-### REST
+Gateway: `http://localhost:8080`, WebSocket: `/ws`, проверка процесса: `/health`.
+Порт меняется через `SERVER_PORT`. Таймаут внутренних запросов:
+`SERVICE_REQUEST_TIMEOUT_MS` (по умолчанию 3000).
+Ручная проверка: `http://localhost:8080/ws-test.html`.
 
-Тела ответов — JSON. Создание и вход сейчас не требуют тела запроса.
+## REST
 
-| Отправитель → получатель | Метод / путь | Запрос | Успешный ответ |
+| Метод | Путь | JSON | Успех |
 |---|---|---|---|
-| Client → Gateway | `GET /health` | Без тела | `200`, `{ "status": "ok" }` — отвечает только сам Gateway |
-| Client → Gateway | `POST /rooms` | Без тела | `201`, `{ roomId, version, paused, positionSeconds, session: Session }`; заголовок `Location: /rooms/{roomId}/state` |
-| Client → Gateway | `POST /rooms/{roomId}/join` | `roomId` в пути, без тела | `200`, `{ state: State, session: Session }` |
-| Client → Gateway | `GET /rooms/{roomId}/state` | `roomId` в пути, без тела | `200`, `State` |
+| POST | `/rooms` | `{"display_name":"Alice","control_mode":"host_only"}` | 201, ответ Room Service без изменений |
+| POST | `/rooms/join` | `{"invite_code":"AbCdEf_12345","display_name":"Bob"}` | 201, ответ Room Service без изменений |
 
-Обработанная ошибка отсутствующей комнаты: `404`, `{ "code": "ROOM_NOT_FOUND", "message": "..." }`. Фейк сейчас её не генерирует; тесты проверяют передачу ошибки от подменённого backend. Единый формат прочих REST-ошибок и проверка токена REST-чтения пока не реализованы.
+Эти два запроса не требуют токена. Тела и ошибки соответствуют контракту;
+ошибка имеет форму `{"error":{"code":"...","message":"..."}}`.
 
-### WebSocket: запросы клиента
+## WebSocket `/ws`
 
-Общий конверт:
+Первым сообщением рекомендуется отправить:
 
 ```json
-{
-  "type": "playback.seek",
-  "requestId": "request-1",
-  "payload": {
-    "sessionToken": "demo-host-token",
-    "commandId": "command-1",
-    "positionSeconds": 120.5
-  }
-}
+{"type":"getState","token":"alice-token","payload":{}}
 ```
 
-`type` и `requestId` — непустые строки. Для прикладных команд `payload` — объект; у `ping` его содержимое не проверяется. В таблице перечислены поля `payload`, а не отдельные HTTP-endpoints.
+Токен обязателен **в каждом пользовательском сообщении**, не в query string и не внутри payload.
+До первого сообщения Gateway не знает сессию: начальный `sendState` отправляется после
+первого валидного сообщения с токеном и успешного чтения состояния из Room Service.
+Он содержит `initialMessageSeq`, полученный из Chat Service.
+Повторные `getState` возвращают `sendState` без начального номера.
+Во время инициализации рассылки буферизуются; сообщения чата с номером не больше
+начального не отправляются. Буфер ограничен 256 событиями.
 
-Для команд ниже **`C` = `sessionToken: string` + `commandId: string`**, обе строки непустые. `requestId` связывает запрос с ответом; `commandId` предназначен для дедупликации операции ответственным сервисом. Это разные назначения.
+| type | payload | HTTP-вызов |
+|---|---|---|
+| `playpause` | `{}` | POST `/rooms/{room_id}/commands`, type=`playpause` |
+| `nextVideo` | `{}` | commands, type=`next` |
+| `seek` | `{"position_seconds":30}` | commands, type=`seek` |
+| `addVideo` | `{"url":"https://rutube.ru/video/abc123/"}` | commands, type=`add_video` |
+| `removeVideo` | `{"video_id":"video-1"}` | commands, type=`remove_video` |
+| `changeQueue` | `{"video_ids":["video-2","video-1"]}` | commands, type=`change_queue` |
+| `setSettings` | `{"mode":"all"}` | commands, type=`set_control_mode` |
+| `leaveRoom` | `{}` | POST `/rooms/{room_id}/leave`, без тела |
+| `sendMessage` | `{"text":"Привет!"}` | POST `/rooms/{room_id}/messages` |
+| `getState` | `{}` | GET `/rooms/{room_id}` |
+| `getChatSeq` | `{}` | GET `/rooms/{room_id}/messages/seq` |
 
-| Отправитель → получатель | `type`                 | Поля `payload`                                    | Успешный результат                                                |
-| ------------------------ | ---------------------- | ------------------------------------------------- | ----------------------------------------------------------------- |
-| Client → Gateway         | `ping`                 | Не используются                                   | Только отправителю: `pong`, `{ status: "ok" }`                    |
-| Client → Gateway         | `session.authenticate` | `sessionToken: string`, непустой                  | Только отправителю: `session.authenticated`, `{ userId, roomId }` |
-| Client → Gateway         | `playback.play`        | `C`                                               | Комнате: `room.state`; отправителю: `command.ack`                 |
-| Client → Gateway         | `playback.pause`       | `C`                                               | Комнате: `room.state`; отправителю: `command.ack`                 |
-| Client → Gateway         | `playback.seek`        | `C`, `positionSeconds: number`                    | Комнате: `room.state`; отправителю: `command.ack`                 |
-| Client → Gateway         | `playback.next`        | `C`                                               | Комнате: `room.state`; отправителю: `command.ack`                 |
-| Client → Gateway         | `queue.add`            | `C`, `url: string`                                | Комнате: `room.state`; отправителю: `command.ack`                 |
-| Client → Gateway         | `queue.remove`         | `C`, `itemId: string`                             | Комнате: `room.state`; отправителю: `command.ack`                 |
-| Client → Gateway         | `queue.move`           | `C`, `itemId: string`, `toIndex: integer` (int32) | Комнате: `room.state`; отправителю: `command.ack`                 |
-| Client → Gateway         | `chat.send`            | `C`, `text: string`                               | Комнате: `chat.message`; отправителю: `command.ack`               |
+Для изменяющих действий обязателен верхнеуровневый `commandId`, который передаётся
+как `command_id`. Чтения отправляются без ID. Внутренние запросы передают
+`Authorization: Bearer <token>`; клиентские participant_id/роли не принимаются.
 
-До авторизации разрешены только `ping` и `session.authenticate`. Повторная авторизация уже привязанного соединения отклоняется.
+Команды подтверждаются `commandConfirm` с исходным `commandId`, флагом `duplicate`
+и полным `state` либо `message`. Выход подтверждается `left`, без `duplicate`.
+После выхода сокет закрывается. `getChatSeq` возвращает `commandConfirm` с `messageSeq`, без ID.
+Бизнес-ошибки сервисов сохраняют `code` и `message`.
 
-Gateway проверяет форму данных, но не существование комнаты, права, допустимость ссылки, диапазоны позиции/индекса или содержание текста. Числовая позиция должна представляться конечным `double`. Решения о принятии команды делегируются backend. Ограничения диапазонов и правила очереди необходимо согласовать с Room Service.
+Рассылка состояния: `{"type":"sendState","state":{...}}`.
+Рассылка чата, включая автора: `{"type":"sendMessage","message":{...}}`.
+Токены и ID чужих команд в рассылки не попадают. Старое состояние из duplicate-ответа
+не рассылается; duplicate-сообщение чата рассылается с прежним messageSeq.
+Подтверждение отправляется до рассылки.
 
-### WebSocket: ответы и события сервера
+Heartbeat: Gateway отправляет `{"type":"pig","pigId":"..."}`;
+клиент отвечает `{"type":"pong","pigId":"..."}`. Интервал — 5 секунд,
+ожидание ответа — 10 секунд. Неверный pigId не подтверждает heartbeat.
+Неавторизованные соединения также имеют 10 секунд на инициализацию.
+Каждую секунду Gateway перечитывает состояние активных комнат для сверки клиентов.
+Интервалы настраиваются свойствами `gateway.heartbeat-interval-ms`,
+`gateway.heartbeat-timeout-ms`, `gateway.state-refresh-ms`.
 
-Все сообщения имеют конверт `{ type, requestId, payload }`.
+Сетевые ошибки: `service_unavailable` (502), `gateway_timeout` (504).
+Gateway не повторяет изменяющие запросы автоматически. После таймаута клиент должен
+повторить команду с **тем же ID и параметрами**.
 
-| Отправитель → получатель | `type` | `requestId` | `payload` |
-|---|---|---|---|
-| Gateway → отправитель | `pong` | Из запроса | `{ status: "ok" }` |
-| Gateway → отправитель | `session.authenticated` | Из запроса | `{ userId, roomId }` |
-| Gateway → отправитель команды комнаты | `command.ack` | Из запроса | `{ commandId, stateVersion }` |
-| Gateway → отправитель сообщения чата | `command.ack` | Из запроса | `{ commandId, messageId }` |
-| Gateway → все подключённые клиенты комнаты, включая отправителя | `room.state` | `null` | `State`, полученный от backend |
-| Gateway → все подключённые клиенты комнаты, включая отправителя | `chat.message` | `null` | `ChatMessage`, полученный от backend |
-| Gateway → отправитель | `error` | Из запроса, либо `null`, если ID не удалось извлечь | `{ code: string, message: string }` |
+## Границы действующего контракта
 
-Сейчас рассылка события вызывается перед отправкой подтверждения. При отклонении команды её событие не рассылается. Подтверждение не означает доставку события всем клиентам.
+Не добавляются выдуманные endpoint-ы или обязательные параметры. Поэтому есть
+интеграционные ограничения, которые невозможно снять только в Gateway:
 
-Возможные обработанные коды: `INVALID_MESSAGE`, `UNKNOWN_MESSAGE_TYPE`, `UNAUTHORIZED`, `ALREADY_AUTHENTICATED`, а также отказы backend: например, `FORBIDDEN`, `ROOM_NOT_FOUND`, `QUEUE_ITEM_NOT_FOUND`, `INVALID_QUEUE_POSITION`. Это не полная спецификация ошибок будущих сервисов.
+* Контракт не содержит поиска комнаты по непрозрачному токену. Gateway запоминает
+  `token → room_id` из create/join в памяти и проверяет токен через защищённое чтение
+  Room Service. Переподключение работает, пока жив этот экземпляр Gateway.
+  После перезапуска привязки теряются; для восстановления старых сессий нужен
+  согласованный механизм разрешения токена или постоянное хранилище привязок.
+* Контракт не содержит вызовов уведомления Room Service о connect/disconnect.
+  Gateway обнаруживает обрыв и чистит свои соединения, но не может сообщить сервису
+  о потере связи и запустить предусмотренную ТР передачу ведущего через 10 секунд.
+  Явный leave отправляется строго по контракту.
+* Нет endpoint-а чтения пропущенных сообщений чата. `getChatSeq` реализован,
+  но восстановление диапазона сообщений из ТР требует дополнения контракта.
+* Если Chat Service недоступен при подключении, Gateway отправляет состояние без
+  `initialMessageSeq` и сразу включает синхронизацию и команды комнаты. Чат остаётся
+  неинициализированным. Gateway повторяет его инициализацию каждые 5 секунд
+  (`gateway.chat-recovery-ms`), а также при запросах чата. После восстановления
+  приходит `sendState` с настоящим `initialMessageSeq`; только затем включается
+  доставка чата. История за время недоступности не загружается.
+* Реализация рассчитана на один экземпляр Gateway. Команды одной WebSocket-сессии
+  поступают последовательно; глобальный порядок команд комнаты и дедупликацию
+  обеспечивает Room Service согласно контракту.
 
-## Gateway ↔ внутренние сервисы
-
-**Ниже текущие Java-вызовы интерфейсов, а не утверждённые HTTP-адреса или JSON-тела.** При интеграции их реализации будут отправлять HTTP-запросы. Несколько методов могут соответствовать одному внутреннему endpoint команд.
-
-**Разработчикам Room Service и Chat Service:** для необходимых операций укажите HTTP-методы и пути endpoints, формат запросов, способ передачи сессии, успешные ответы и ошибки. Эти контракты согласуются с разработчиком Gateway, после чего Gateway сможет отправлять соответствующие HTTP-запросы вместо вызовов заглушек. Имена Java-методов ниже не требуют отдельных одноимённых endpoints: несколько операций могут обслуживаться одним endpoint. Таблица — предварительный список потребностей Gateway, а не полная спецификация сервисов по ТР.
-
-| Отправитель → получатель | Текущая операция интерфейса | Передаваемые данные | Ожидаемый результат |
-|---|---|---|---|
-| Gateway → Room Service | `RoomBackend.createRoom()` | Пока без параметров | `{ state: State, session: Session }` |
-| Gateway → Room Service | `RoomBackend.joinRoom(roomId)` | `roomId` | `{ state: State, session: Session }` |
-| Gateway → Room Service | `RoomBackend.getSnapshot(roomId)` | `roomId`; передача токена для этого вызова ещё требуется | `State` |
-| Gateway → Room Service / проверка сессии | `SessionBackend.findByToken(sessionToken)` | `sessionToken` | `Session` или отсутствие действительной сессии |
-| Gateway → Room Service | `RoomBackend.play(...)` | `roomId`, `sessionToken`, `commandId` | `State` или отказ |
-| Gateway → Room Service | `RoomBackend.pause(...)` | `roomId`, `sessionToken`, `commandId` | `State` или отказ |
-| Gateway → Room Service | `RoomBackend.seek(...)` | `roomId`, `sessionToken`, `commandId`, `positionSeconds` | `State` или отказ |
-| Gateway → Room Service | `RoomBackend.next(...)` | `roomId`, `sessionToken`, `commandId` | `State` или отказ |
-| Gateway → Room Service | `RoomBackend.addVideo(...)` | `roomId`, `sessionToken`, `commandId`, `url` | `State` или отказ |
-| Gateway → Room Service | `RoomBackend.removeVideo(...)` | `roomId`, `sessionToken`, `commandId`, `itemId` | `State` или отказ |
-| Gateway → Room Service | `RoomBackend.moveVideo(...)` | `roomId`, `sessionToken`, `commandId`, `itemId`, `toIndex` | `State` или отказ |
-| Gateway → Chat Service | `ChatBackend.sendMessage(...)` | `roomId`, `userId` из привязки соединения, `sessionToken`, `commandId`, `text` | `ChatMessage` или отказ |
-
-Room Service отвечает за комнаты, сессии, права, состояние, версии, порядок команд и дедупликацию. Chat Service отвечает за принятие и сохранение сообщения и проверяет членство через Room Service согласно ТР. Gateway хранит только локальные подключения и подтверждённую backend привязку пользователя/комнаты, направляет запросы и доставляет ответы/события.
-
-При интеграции результаты команд нужно расширить до согласованного подтверждения с полным состоянием/сообщением: текущие интерфейсы возвращают только данные, а Gateway формирует `ack` сам. Сетевые ошибки и HTTP-статусы также ещё согласуются.
-
-## Заглушки и ограничения
-
-- `FakeRoomBackend` не хранит состояние и не применяет команды: возвращает пример `State` с версией `1`, паузой и пустой очередью.
-- Создание/вход возвращают фиксированную комнату `demo-room`. Токены: `demo-host-token` и `demo-guest-token`; это **не настоящая аутентификация**, не использовать для реальных пользователей.
-- `FakeSessionBackend` возвращает подготовленные привязки для этих двух токенов. Остальные не принимает.
-- `FakeChatBackend` возвращает сообщение с фиксированными ID/временем и переданным текстом. Историю не хранит и не загружает.
-- Фейки не подтверждают корректность бизнес-операций. Тесты проверяют транспорт, делегирование и передачу ошибок, а не реальную интеграцию.
-- Пока отсутствуют настоящие HTTP-клиенты, полноценная защита REST, роли/настройки, список участников, connect/disconnect/leave в Room Service, начальный снимок при WebSocket-подключении, восстановление/периодическая сверка, дедупликация, `messageSeq`, таймауты и ограничения нагрузки.
-- При закрытии сокета очищается только локальный реестр; уведомления внутренних сервисов пока нет.
-- Автоматические повторы изменяющих команд не включать до интеграции дедупликации. Проект пока не является полной реализацией ТР.
+Тесты в `src/test` поднимают настоящий Gateway на случайном порту и контрактные
+HTTP-серверы Room/Chat. Это проверка Gateway независимо от готовности других сервисов,
+не утверждение о завершённой интеграции всего проекта.

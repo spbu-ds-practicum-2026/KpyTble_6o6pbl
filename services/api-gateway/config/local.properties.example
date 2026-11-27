@@ -1,0 +1,10 @@
+# Copy to config/local.properties. Run Gateway from services/api-gateway.
+server.port=6767
+
+# Replace with IP addresses and ports of the Room and Chat laptops.
+gateway.room-service-url=http://localhost:8000
+gateway.chat-service-url=http://localhost:8001
+
+# Origin of the page opened in the browser: scheme + hostname/IP + port, no trailing slash.
+# Multiple origins can be separated by commas. Same-origin requests need no entry.
+gateway.allowed-origins=http://localhost:3000

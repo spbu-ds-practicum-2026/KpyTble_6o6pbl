@@ -1,6 +1,7 @@
 # Gradle - локальный кеш и результаты сборки
 .gradle/
 build/
+config/local.properties
 
 # Java - скомпиленные классы
 *.class

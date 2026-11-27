@@ -1,11 +1,60 @@
 <!doctype html>
 <html lang="ru">
-<head>
-    <meta charset="UTF-8">
-    <title>Проверка WebSocket</title>
-</head>
-<body>
-    <h1>Проверка WebSocket Gateway</h1>
-    <p>Открой консоль разработчика.</p>
-</body>
+<meta charset="utf-8">
+<title>Plotina Gateway — проверка контракта</title>
+<h1>Проверка Gateway</h1>
+<p>Создание и вход проходят через этот Gateway, чтобы он получил привязку токена к комнате.</p>
+<input id="name" value="Alice" aria-label="Имя">
+<button id="create">Создать комнату</button>
+<input id="invite" placeholder="invite_code" aria-label="Код приглашения">
+<button id="join">Войти</button>
+<p><input id="token" placeholder="token" size="60" aria-label="Токен">
+<button id="connect">Подключить /ws</button></p>
+<textarea id="message" rows="5" cols="90">{"type":"getState","payload":{}}</textarea>
+<p><button id="send">Отправить (token добавляется автоматически)</button></p>
+<pre id="log"></pre>
+<script>
+let socket;
+const el = id => document.getElementById(id);
+const log = value => { el('log').textContent += JSON.stringify(value, null, 2) + '\n'; };
+async function enter(path, body) {
+  try {
+    const response = await fetch(path, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+    });
+    const result = await response.json();
+    log(result);
+    if (response.ok) {
+      el('token').value = result.token;
+      el('invite').value = result.invite_code;
+    }
+  } catch (error) { log(String(error)); }
+}
+el('create').onclick = () => enter('/rooms', {display_name: el('name').value, control_mode: 'host_only'});
+el('join').onclick = () => enter('/rooms/join', {display_name: el('name').value, invite_code: el('invite').value});
+el('connect').onclick = () => {
+  if (socket) socket.close();
+  socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
+  socket.onopen = () => socket.send(JSON.stringify({type: 'getState', token: el('token').value, payload: {}}));
+  socket.onmessage = event => {
+    const message = JSON.parse(event.data);
+    if (message.type === 'pig') socket.send(JSON.stringify({type: 'pong', pigId: message.pigId}));
+    else log(message);
+  };
+  socket.onclose = event => log({closed: event.code});
+  socket.onerror = () => log('Ошибка WebSocket');
+};
+el('send').onclick = () => {
+  try {
+    const message = JSON.parse(el('message').value);
+    message.token = el('token').value;
+    if (!['getState', 'getChatSeq'].includes(message.type) && !message.commandId) {
+      message.commandId = crypto.randomUUID();
+    }
+    // Preserve this ID in the editor so a manual retry uses the same commandId.
+    el('message').value = JSON.stringify(message, null, 2);
+    socket.send(JSON.stringify(message));
+  } catch (error) { log(String(error)); }
+};
+</script>
 </html>

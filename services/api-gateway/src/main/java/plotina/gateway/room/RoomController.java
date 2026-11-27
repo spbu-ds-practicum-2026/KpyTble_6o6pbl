@@ -1,67 +1,54 @@
 package plotina.gateway.room;
 
-import java.net.URI;
-
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
-
-import plotina.gateway.room.backend.RoomBackend;
-import plotina.gateway.room.backend.RoomSnapshot;
-import plotina.gateway.room.RoomEntryService;
+import org.springframework.web.bind.annotation.*;
+import plotina.gateway.http.ContractValidation;
+import plotina.gateway.http.GatewayException;
+import plotina.gateway.http.ServiceClient;
+import plotina.gateway.session.SessionDirectory;
+import plotina.gateway.websocket.RoomBroadcaster;
 
 @RestController
 @RequestMapping("/rooms")
 public class RoomController {
+  private final ServiceClient services;
+  private final SessionDirectory sessions;
+  private final RoomBroadcaster broadcaster;
 
-  private final RoomBackend roomBackend;
-  private final RoomEntryService roomEntryService;
-
-  public RoomController(
-      RoomBackend roomBackend,
-      RoomEntryService roomEntryService) {
-    this.roomBackend = roomBackend;
-    this.roomEntryService = roomEntryService;
+  public RoomController(ServiceClient services, SessionDirectory sessions, RoomBroadcaster broadcaster) {
+    this.services = services;
+    this.sessions = sessions;
+    this.broadcaster = broadcaster;
   }
 
   @PostMapping
-  public ResponseEntity<CreateRoomResponse> createRoom() {
-    RoomEntryService.RoomEntryResult result = roomEntryService.createRoom();
-
-    RoomSnapshot state = result.state();
-
-    CreateRoomResponse response = new CreateRoomResponse(
-        state.roomId(),
-        state.version(),
-        state.paused(),
-        state.positionSeconds(),
-        result.session());
-
-    URI stateUri = URI.create(
-        "/rooms/" + state.roomId() + "/state");
-
-    return ResponseEntity
-        .created(stateUri)
-        .body(response);
+  public ResponseEntity<JsonNode> create(@RequestBody JsonNode request) {
+    ContractValidation.fields(request, "display_name", "control_mode");
+    ContractValidation.text(request, "display_name");
+    ContractValidation.mode(request, "control_mode");
+    return enter("/rooms", request);
   }
 
-  @GetMapping("/{roomId}/state")
-  public RoomSnapshot getState(
-      @PathVariable("roomId") String roomId) {
-    return roomBackend.getSnapshot(roomId);
+  @PostMapping("/join")
+  public ResponseEntity<JsonNode> join(@RequestBody JsonNode request) {
+    ContractValidation.fields(request, "invite_code", "display_name");
+    ContractValidation.text(request, "invite_code");
+    ContractValidation.text(request, "display_name");
+    return enter("/rooms/join", request);
   }
 
-  @PostMapping("/{roomId}/join")
-  public JoinRoomResponse joinRoom(
-      @PathVariable("roomId") String roomId) {
-    RoomEntryService.RoomEntryResult result = roomEntryService.joinRoom(roomId);
-
-    return new JoinRoomResponse(
-        result.state(),
-        result.session());
+  private ResponseEntity<JsonNode> enter(String path, JsonNode request) {
+    JsonNode response = services.room("POST", path, null, request);
+    if (!response.path("token").isTextual() || !response.path("room_id").isTextual()
+        || !response.path("state").isObject()) {
+      throw new GatewayException(502, "bad_gateway", "Invalid room entry response");
+    }
+    String room = response.path("room_id").asText();
+    sessions.remember(response.path("token").asText(), room);
+    broadcaster.broadcast(room, JsonNodeFactory.instance.objectNode()
+        .put("type", "sendState").set("state", response.path("state")));
+    return ResponseEntity.status(201).body(response);
   }
-
 }

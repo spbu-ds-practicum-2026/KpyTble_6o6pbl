@@ -1,461 +1,269 @@
 package plotina.gateway.websocket;
 
+import java.io.IOException;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 import com.fasterxml.jackson.databind.JsonNode;
-
-import org.springframework.stereotype.Component;
-import org.springframework.web.socket.TextMessage;
-import org.springframework.web.socket.WebSocketSession;
-import org.springframework.web.socket.handler.TextWebSocketHandler;
-import org.springframework.web.socket.CloseStatus;
-
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-
-import plotina.gateway.session.backend.SessionBackend;
-import plotina.gateway.session.backend.SessionInfo;
-import plotina.gateway.room.backend.RoomNotFoundException;
-import plotina.gateway.room.backend.RoomSnapshot;
-import plotina.gateway.command.CommandRejectedException;
-import plotina.gateway.room.RoomCommandService;
-import plotina.gateway.room.backend.QueueItemNotFoundException;
-import plotina.gateway.room.backend.InvalidQueuePositionException;
-import plotina.gateway.chat.backend.ChatMessage;
-import plotina.gateway.chat.ChatService;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
+import org.springframework.web.socket.*;
+import org.springframework.web.socket.handler.TextWebSocketHandler;
+import plotina.gateway.http.ContractValidation;
+import plotina.gateway.http.GatewayException;
+import plotina.gateway.http.ServiceClient;
+import plotina.gateway.session.SessionDirectory;
 
 @Component
 public class GatewayWebSocketHandler extends TextWebSocketHandler {
-
-  private static final String SESSION_ATTRIBUTE = GatewayWebSocketHandler.class.getName() + ".session";
-
-  private final ObjectMapper objectMapper;
-  private final SessionBackend sessionBackend;
-  private final ConnectionRegistry connectionRegistry;
+  private static final Logger log = LoggerFactory.getLogger(GatewayWebSocketHandler.class);
+  private static final Map<String, String> ROOM_COMMANDS = Map.of(
+      "playpause", "playpause", "nextVideo", "next", "seek", "seek",
+      "addVideo", "add_video", "removeVideo", "remove_video",
+      "changeQueue", "change_queue", "setSettings", "set_control_mode");
+  private static final Set<String> READS = Set.of("getState", "getChatSeq");
+  private final ObjectMapper mapper;
+  private final ServiceClient services;
+  private final SessionDirectory sessions;
+  private final ConnectionRegistry registry;
   private final WebSocketSender sender;
   private final RoomBroadcaster broadcaster;
-  private final RoomCommandService roomCommandService;
-  private final ChatService chatService;
+  private final long heartbeatTimeout;
 
-  public GatewayWebSocketHandler(
-      ObjectMapper objectMapper,
-      SessionBackend sessionBackend,
-      ConnectionRegistry connectionRegistry,
-      WebSocketSender sender,
-      RoomCommandService roomCommandService,
-      RoomBroadcaster broadcaster,
-      ChatService chatService) {
-    this.objectMapper = objectMapper;
-    this.sessionBackend = sessionBackend;
-    this.connectionRegistry = connectionRegistry;
+  public GatewayWebSocketHandler(ObjectMapper mapper, ServiceClient services, SessionDirectory sessions,
+      ConnectionRegistry registry, WebSocketSender sender, RoomBroadcaster broadcaster,
+      @Value("${gateway.heartbeat-timeout-ms:10000}") long heartbeatTimeout) {
+    this.mapper = mapper;
+    this.services = services;
+    this.sessions = sessions;
+    this.registry = registry;
     this.sender = sender;
-    this.roomCommandService = roomCommandService;
     this.broadcaster = broadcaster;
-    this.chatService = chatService;
-  }
-
-  private void executeRoomCommand(
-      WebSocketSession socket,
-      ClientMessage request,
-      RoomCommand action) throws Exception {
-    JsonNode payload = request.payload();
-
-    JsonNode tokenNode = payload == null
-        ? null
-        : payload.get("sessionToken");
-
-    JsonNode commandIdNode = payload == null
-        ? null
-        : payload.get("commandId");
-
-    if (payload == null || !payload.isObject()
-        || tokenNode == null
-        || !tokenNode.isTextual()
-        || tokenNode.asText().isBlank()
-        || commandIdNode == null
-        || !commandIdNode.isTextual()
-        || commandIdNode.asText().isBlank()) {
-      sendError(
-          socket,
-          request.requestId(),
-          "INVALID_MESSAGE",
-          "Session token and command ID must be non-empty strings");
-      return;
-    }
-    AuthenticatedSession identity = (AuthenticatedSession) socket.getAttributes()
-        .get(SESSION_ATTRIBUTE);
-
-    if (identity == null) {
-      sendError(
-          socket,
-          request.requestId(),
-          "UNAUTHORIZED",
-          "Authenticate the connection first");
-      return;
-    }
-
-    RoomSnapshot state;
-
-    try {
-      state = action.execute(new CommandContext(
-          identity.userId(), identity.roomId(),
-          tokenNode.asText(), commandIdNode.asText(), payload));
-    } catch (CommandRejectedException exception) {
-      sendError(
-          socket,
-          request.requestId(),
-          exception.code(),
-          exception.getMessage());
-      return;
-    } catch (RoomNotFoundException exception) {
-      sendError(
-          socket,
-          request.requestId(),
-          "ROOM_NOT_FOUND",
-          "Room not found");
-      return;
-    }
-
-    broadcaster.broadcast(
-        state.roomId(),
-        new ServerMessage("room.state", null, state));
-
-    send(
-        socket,
-        new ServerMessage(
-            "command.ack",
-            request.requestId(),
-            new CommandAck(
-                commandIdNode.asText(),
-                state.version())));
+    this.heartbeatTimeout = heartbeatTimeout;
   }
 
   @Override
-  public void afterConnectionClosed(
-      WebSocketSession session,
-      CloseStatus status) {
-    connectionRegistry.remove(session.getId());
-  }
-
-  private void authenticate(
-      WebSocketSession session,
-      ClientMessage request) throws Exception {
-    if (session.getAttributes().containsKey(SESSION_ATTRIBUTE)) {
-      sendError(
-          session,
-          request.requestId(),
-          "ALREADY_AUTHENTICATED",
-          "Connection is already authenticated");
-      return;
-    }
-
-    JsonNode payload = request.payload();
-    JsonNode tokenNode = payload == null
-        ? null
-        : payload.get("sessionToken");
-
-    if (tokenNode == null
-        || !tokenNode.isTextual()
-        || tokenNode.asText().isBlank()) {
-      sendError(
-          session,
-          request.requestId(),
-          "INVALID_MESSAGE",
-          "Session token must be a non-empty string");
-      return;
-    }
-
-    SessionInfo identity = sessionBackend
-        .findByToken(tokenNode.asText())
-        .orElse(null);
-
-    if (identity == null) {
-      sendError(
-          session,
-          request.requestId(),
-          "UNAUTHORIZED",
-          "Invalid session token");
-      return;
-    }
-
-    AuthenticatedSession authenticatedSession = new AuthenticatedSession(
-        identity.userId(),
-        identity.roomId());
-
-    session.getAttributes().put(
-        SESSION_ATTRIBUTE,
-        authenticatedSession);
-
-    connectionRegistry.register(
-        session,
-        authenticatedSession.userId(),
-        authenticatedSession.roomId());
-
-    send(
-        session,
-        new ServerMessage(
-            "session.authenticated",
-            request.requestId(),
-            authenticatedSession));
+  public void afterConnectionEstablished(WebSocketSession socket) {
+    socket.setTextMessageSizeLimit(64 * 1024);
+    registry.register(socket);
   }
 
   @Override
-  protected void handleTextMessage(
-      WebSocketSession session,
-      TextMessage message) throws Exception {
-    ClientMessage request;
+  protected void handleTextMessage(WebSocketSession socket, TextMessage message) throws IOException {
+    String commandId = null;
     try {
-      request = objectMapper.readValue(message.getPayload(), ClientMessage.class);
-    } catch (JsonProcessingException exception) {
-      sendError(session, null, "INVALID_MESSAGE",
-          "Message must match the expected JSON structure");
-      return;
-    }
-
-    if (request == null || request.type() == null || request.type().isBlank()) {
-      sendError(session, null, "INVALID_MESSAGE",
-          "Message type is required");
-      return;
-    }
-
-    if (request.requestId() == null
-        || request.requestId().isBlank()) {
-      sendError(session, null, "INVALID_MESSAGE",
-          "Request ID is required");
-      return;
-    }
-
-    boolean publicMessage = request.type().equals("ping")
-        || request.type().equals("session.authenticate");
-
-    if (!publicMessage
-        && !session.getAttributes().containsKey(SESSION_ATTRIBUTE)) {
-      sendError(
-          session,
-          request.requestId(),
-          "UNAUTHORIZED",
-          "Authenticate the connection first");
-      return;
-    }
-
-    switch (request.type()) {
-      case "ping" -> send(
-          session,
-          new ServerMessage(
-              "pong",
-              request.requestId(),
-              new PongPayload("ok")));
-
-      case "session.authenticate" -> authenticate(session, request);
-
-      case "playback.pause" -> executeRoomCommand(session, request, this::pause);
-      case "playback.play" -> executeRoomCommand(session, request, this::play);
-      case "playback.seek" -> executeRoomCommand(session, request, this::seek);
-      case "playback.next" -> executeRoomCommand(session, request, this::next);
-      case "queue.add" -> executeRoomCommand(session, request, this::addVideo);
-      case "queue.remove" -> executeRoomCommand(session, request, this::removeVideo);
-      case "queue.move" -> executeRoomCommand(session, request, this::moveVideo);
-
-      case "chat.send" -> sendChatMessage(session, request);
-
-      default -> sendError(
-          session,
-          request.requestId(),
-          "UNKNOWN_MESSAGE_TYPE",
-          "Unsupported message type");
-    }
-
-  }
-
-  private void sendChatMessage(
-      WebSocketSession socket,
-      ClientMessage request) throws Exception {
-    try {
-      JsonNode payload = request.payload();
-
-      if (payload == null || !payload.isObject()) {
-        throw new CommandRejectedException(
-            "INVALID_MESSAGE",
-            "Payload must be an object");
+      JsonNode request;
+      try { request = mapper.readTree(message.getPayload()); }
+      catch (IOException exception) { throw new GatewayException(422, "invalid_payload", "Invalid JSON"); }
+      if (request == null || !request.isObject()) ContractValidation.invalid("Expected a JSON object");
+      if (request.path("commandId").isTextual()) commandId = request.path("commandId").asText();
+      String type = ContractValidation.text(request, "type");
+      var connection = registry.get(socket.getId());
+      if (connection == null) throw new GatewayException(401, "unauthorized", "Connection is closed");
+      if ("pong".equals(type)) {
+        ContractValidation.fields(request, "type", "pigId");
+        synchronized (connection) {
+          if (ContractValidation.text(request, "pigId").equals(connection.pigId)) connection.pigId = null;
+        }
+        return;
       }
-
-      String token = requiredText(
-          payload,
-          "sessionToken",
-          "Session token must be a string");
-
-      String commandId = requiredText(
-          payload,
-          "commandId",
-          "Command ID must be a string");
-
-      String text = requiredText(
-          payload,
-          "text",
-          "Message text must be a string");
-
-      if (token.isBlank() || commandId.isBlank()) {
-        throw new CommandRejectedException(
-            "INVALID_MESSAGE",
-            "Session token and command ID must not be blank");
+      if (!ROOM_COMMANDS.containsKey(type) && !READS.contains(type)
+          && !Set.of("leaveRoom", "sendMessage").contains(type)) {
+        ContractValidation.invalid("Unknown message type");
       }
-
-      AuthenticatedSession identity = (AuthenticatedSession) socket.getAttributes()
-          .get(SESSION_ATTRIBUTE);
-
-      if (identity == null) {
-        throw new CommandRejectedException(
-            "UNAUTHORIZED",
-            "Authenticate the connection first");
+      boolean read = READS.contains(type);
+      if (read) ContractValidation.fields(request, "type", "token", "payload");
+      else {
+        ContractValidation.fields(request, "type", "commandId", "token", "payload");
+        commandId = ContractValidation.text(request, "commandId");
       }
-
-      ChatMessage message = chatService.sendMessage(
-          identity.userId(),
-          identity.roomId(),
-          token,
-          commandId,
-          text);
-
-      broadcaster.broadcast(
-          identity.roomId(),
-          new ServerMessage("chat.message", null, message));
-
-      send(
-          socket,
-          new ServerMessage(
-              "command.ack",
-              request.requestId(),
-              new ChatAck(commandId, message.messageId())));
-    } catch (CommandRejectedException exception) {
-      sendError(
-          socket,
-          request.requestId(),
-          exception.code(),
-          exception.getMessage());
+      String token = ContractValidation.text(request, "token");
+      ContractValidation.payload(type, request.path("payload"));
+      if (connection.token != null && !connection.token.equals(token)) {
+        throw new GatewayException(401, "unauthorized", "Cannot change the session of an open connection");
+      }
+      String room = sessions.room(token);
+      boolean initialized = connection.ready;
+      if (!initialized) initialize(connection, room, token);
+      else if (!connection.chatReady && ("getChatSeq".equals(type) || "sendMessage".equals(type))) {
+        recoverChat(connection);
+      }
+      String path = "/rooms/" + room;
+      if ("getState".equals(type)) {
+        if (initialized) sender.send(socket, event("sendState").set("state", services.room("GET", path, token, null)));
+      } else if ("getChatSeq".equals(type)) {
+        JsonNode seq = services.chat("GET", path + "/messages/seq", token, null);
+        sender.send(socket, event("commandConfirm").set("messageSeq", seq.path("messageSeq")));
+      } else if ("leaveRoom".equals(type)) {
+        JsonNode result = services.room("POST", path + "/leave", token, null);
+        sender.send(socket, confirm(commandId).set("left", result.path("left")));
+        sessions.forget(token);
+        registry.remove(socket.getId());
+        socket.close(CloseStatus.NORMAL);
+        refreshRoom(room);
+      } else {
+        ObjectNode body = mapper.createObjectNode().put("command_id", commandId);
+        JsonNode result;
+        if ("sendMessage".equals(type)) {
+          body.set("text", request.path("payload").path("text"));
+          result = services.chat("POST", path + "/messages", token, body);
+        } else {
+          body.put("type", ROOM_COMMANDS.get(type)).set("payload", request.path("payload"));
+          result = services.room("POST", path + "/commands", token, body);
+        }
+        ObjectNode response = confirm(commandId).set("duplicate", result.path("duplicate"));
+        String field = "sendMessage".equals(type) ? "message" : "state";
+        response.set(field, result.path(field));
+        sender.send(socket, response);
+        // Duplicate chat delivery repairs lost events; clients deduplicate by messageSeq.
+        // A saved room snapshot may be stale: never broadcast it as a new state on retry.
+        if ("message".equals(field) || !result.path("duplicate").asBoolean()) {
+          broadcaster.broadcast(room, event("message".equals(field) ? "sendMessage" : "sendState")
+              .set(field, result.path(field)));
+        }
+      }
+    } catch (GatewayException exception) {
+      ObjectNode response = event("commandConfirm");
+      if (commandId != null) response.put("commandId", commandId);
+      sender.send(socket, response.set("error", exception.error()));
+    } catch (RuntimeException exception) {
+      log.error("Unexpected WebSocket command failure for connection {}", socket.getId());
+      ObjectNode response = event("commandConfirm");
+      if (commandId != null) response.put("commandId", commandId);
+      sender.send(socket, response.set("error", mapper.createObjectNode()
+          .put("code", "internal_error").put("message", "Internal gateway error")));
     }
   }
 
-  private RoomSnapshot pause(CommandContext command) {
-    return roomCommandService.pause(
-        command.userId(), command.roomId(), command.token(), command.commandId());
-  }
-
-  private RoomSnapshot play(CommandContext command) {
-    return roomCommandService.play(
-        command.userId(), command.roomId(), command.token(), command.commandId());
-  }
-
-  private RoomSnapshot seek(CommandContext command) {
-    JsonNode position = command.payload().get("positionSeconds");
-    if (position == null || !position.isNumber() || !Double.isFinite(position.doubleValue())) {
-      throw new CommandRejectedException("INVALID_MESSAGE", "Position must be a number");
-    }
-    return roomCommandService.seek(
-        command.userId(), command.roomId(), command.token(), command.commandId(),
-        position.doubleValue());
-  }
-
-  private RoomSnapshot next(CommandContext command) {
+  private void initialize(ConnectionRegistry.Connection connection, String room, String token) throws IOException {
+    // The first token-bearing message authenticates the connection. The contract has no
+    // handshake token, so an initial state cannot be sent before this message arrives.
+    registry.bind(connection, room, token);
     try {
-      return roomCommandService.next(
-          command.userId(), command.roomId(), command.token(), command.commandId());
-    } catch (QueueItemNotFoundException exception) {
-      throw new CommandRejectedException("QUEUE_ITEM_NOT_FOUND", exception.getMessage());
+      // Register before taking the chat baseline so concurrent broadcasts are buffered.
+      JsonNode state = services.room("GET", "/rooms/" + room, token, null);
+      JsonNode seq = null;
+      try {
+        seq = chatSequence(room, token);
+      } catch (GatewayException exception) {
+        log.warn("Chat initialization unavailable for connection {}; room synchronization remains active",
+            connection.socket.getId());
+      }
+      synchronized (connection) {
+        ObjectNode initial = event("sendState").set("state", state);
+        if (seq != null) {
+          connection.initialSeq = seq.path("messageSeq").asLong();
+          initial.put("initialMessageSeq", connection.initialSeq);
+        }
+        sender.send(connection.socket, initial);
+        connection.chatReady = seq != null;
+        for (JsonNode pending : connection.pending) {
+          if (!RoomBroadcaster.isOldChat(connection, pending)) sender.send(connection.socket, pending);
+        }
+        connection.pending.clear();
+        connection.ready = true;
+      }
+    } catch (RuntimeException | IOException exception) {
+      synchronized (connection) {
+        connection.token = null;
+        connection.roomId = null;
+        connection.pending.clear();
+      }
+      throw exception;
     }
   }
 
-  private RoomSnapshot addVideo(CommandContext command) {
-    String url = requiredText(command.payload(), "url", "Video URL must be a string");
-    return roomCommandService.addVideo(
-        command.userId(), command.roomId(), command.token(), command.commandId(), url);
+  private JsonNode chatSequence(String room, String token) {
+    JsonNode seq = services.chat("GET", "/rooms/" + room + "/messages/seq", token, null);
+    if (!seq.path("messageSeq").isIntegralNumber() || seq.path("messageSeq").asLong() < 0) {
+      throw new GatewayException(502, "bad_gateway", "Invalid chat sequence response");
+    }
+    return seq;
   }
 
-  private RoomSnapshot removeVideo(CommandContext command) {
-    String itemId = requiredText(command.payload(), "itemId", "Queue item ID must be a string");
-    try {
-      return roomCommandService.removeVideo(
-          command.userId(), command.roomId(), command.token(), command.commandId(), itemId);
-    } catch (QueueItemNotFoundException exception) {
-      throw new CommandRejectedException("QUEUE_ITEM_NOT_FOUND", exception.getMessage());
+  private void recoverChat(ConnectionRegistry.Connection connection) throws IOException {
+    JsonNode seq = chatSequence(connection.roomId, connection.token);
+    JsonNode state = services.room("GET", "/rooms/" + connection.roomId, connection.token, null);
+    synchronized (connection) {
+      if (connection.chatReady || registry.get(connection.socket.getId()) != connection) return;
+      connection.initialSeq = seq.path("messageSeq").asLong();
+      sender.send(connection.socket, event("sendState").put("initialMessageSeq", connection.initialSeq)
+          .set("state", state));
+      connection.chatReady = true;
+      for (JsonNode pending : connection.pending) {
+        if (!RoomBroadcaster.isOldChat(connection, pending)) sender.send(connection.socket, pending);
+      }
+      connection.pending.clear();
     }
   }
 
-  private RoomSnapshot moveVideo(CommandContext command) {
-    JsonNode itemId = command.payload().get("itemId");
-    JsonNode index = command.payload().get("toIndex");
-    if (itemId == null || !itemId.isTextual()
-        || index == null || !index.isIntegralNumber() || !index.canConvertToInt()) {
-      throw new CommandRejectedException(
-          "INVALID_MESSAGE", "Item ID must be a string and position must be an integer");
-    }
-    try {
-      return roomCommandService.moveVideo(
-          command.userId(), command.roomId(), command.token(), command.commandId(),
-          itemId.asText(), index.intValue());
-    } catch (QueueItemNotFoundException exception) {
-      throw new CommandRejectedException("QUEUE_ITEM_NOT_FOUND", exception.getMessage());
-    } catch (InvalidQueuePositionException exception) {
-      throw new CommandRejectedException("INVALID_QUEUE_POSITION", exception.getMessage());
+  @Scheduled(fixedDelayString = "${gateway.chat-recovery-ms:5000}")
+  public void recoverChats() {
+    for (var connection : registry.all()) {
+      if (!connection.ready || connection.chatReady) continue;
+      try {
+        recoverChat(connection);
+      } catch (GatewayException | IOException exception) {
+        // Retry later, without interrupting room commands or state broadcasts.
+      }
     }
   }
 
-  private String requiredText(JsonNode payload, String field, String message) {
-    JsonNode value = payload.get(field);
-    if (value == null || !value.isTextual()) {
-      throw new CommandRejectedException("INVALID_MESSAGE", message);
+  private ObjectNode event(String type) { return mapper.createObjectNode().put("type", type); }
+  private ObjectNode confirm(String id) { return event("commandConfirm").put("commandId", id); }
+
+  @Override
+  public void afterConnectionClosed(WebSocketSession socket, CloseStatus status) { registry.remove(socket.getId()); }
+
+  @Override
+  public void handleTransportError(WebSocketSession socket, Throwable exception) throws IOException {
+    registry.remove(socket.getId());
+    socket.close(CloseStatus.SERVER_ERROR);
+  }
+
+  @Scheduled(fixedDelayString = "${gateway.heartbeat-interval-ms:5000}")
+  public void heartbeat() {
+    long now = System.currentTimeMillis();
+    for (var connection : registry.all()) {
+      synchronized (connection) {
+        try {
+          if (!connection.socket.isOpen()) { registry.remove(connection.socket.getId()); continue; }
+          if ((connection.pigId != null && now - connection.pigSentAt >= heartbeatTimeout)
+              || (connection.token == null && now - connection.openedAt >= heartbeatTimeout)) {
+            registry.remove(connection.socket.getId());
+            connection.socket.close(CloseStatus.SESSION_NOT_RELIABLE);
+          } else if (connection.pigId == null) {
+            connection.pigId = UUID.randomUUID().toString();
+            connection.pigSentAt = now;
+            sender.send(connection.socket, event("pig").put("pigId", connection.pigId));
+          }
+        } catch (IOException exception) { registry.remove(connection.socket.getId()); }
+      }
     }
-    return value.asText();
   }
 
-  @FunctionalInterface
-  private interface RoomCommand {
-    RoomSnapshot execute(CommandContext command);
+  // Periodic reconciliation also picks up server-side changes and recovers missed broadcasts.
+  @Scheduled(fixedDelayString = "${gateway.state-refresh-ms:1000}")
+  public void reconcile() {
+    registry.all().stream().filter(c -> c.ready).map(c -> c.roomId).distinct().forEach(this::refreshRoom);
   }
 
-  private record CommandContext(
-      String userId,
-      String roomId,
-      String token,
-      String commandId,
-      JsonNode payload) {
+  private void refreshRoom(String room) {
+    for (var connection : registry.findByRoom(room)) {
+      if (!connection.ready) continue;
+      try {
+        JsonNode state = services.room("GET", "/rooms/" + room, connection.token, null);
+        broadcaster.broadcast(room, event("sendState").set("state", state));
+        return;
+      } catch (GatewayException exception) {
+        // Try another active member (e.g. the previous token was revoked).
+        if (exception.status() != 401 && exception.status() != 403) return;
+      }
+    }
   }
-
-  private void send(
-      WebSocketSession session,
-      ServerMessage message) throws Exception {
-    sender.send(session, message);
-  }
-
-  private void sendError(
-      WebSocketSession session,
-      String requestId,
-      String code,
-      String message) throws Exception {
-    send(
-        session,
-        new ServerMessage(
-            "error",
-            requestId,
-            new ErrorPayload(code, message)));
-  }
-
-  public record PongPayload(String status) {
-  }
-
-  public record ErrorPayload(String code, String message) {
-  }
-
-  public record AuthenticatedSession(
-      String userId,
-      String roomId) {
-  }
-
-  public record CommandAck(
-      String commandId,
-      long stateVersion) {
-  }
-
-  public record ChatAck(
-      String commandId,
-      String messageId) {
-  }
-
 }
