@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plotina — проверка Gateway / чата</title>
+<style>
+  body { max-width: 900px; margin: 24px auto; padding: 0 16px; font: 16px system-ui; }
+  label { display: block; margin: 12px 0; }
+  input, textarea { box-sizing: border-box; width: 100%; padding: 8px; font: inherit; }
+  button { margin: 4px; padding: 8px; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f1f3f5; padding: 12px; }
+</style>
+<h1>Проверка чата через Gateway</h1>
+<p>Это ручной клиент согласованного WebSocket-протокола. Для двух участников открой
+две вкладки с разными токенами одной комнаты. Токен не сохраняется в браузере.</p>
+<label>Адрес WebSocket Gateway <input id="url" value="ws://127.0.0.1:8080/ws"></label>
+<label>Токен участника <input id="token" type="password" autocomplete="off"></label>
+<button id="connect">Подключиться</button>
+<button id="disconnect">Отключиться</button>
+<button id="state">getState</button>
+<button id="seq">getChatSeq</button>
+<p id="status" role="status">Не подключено</p>
+<label>Текст сообщения <textarea id="text" rows="2">Привет!</textarea></label>
+<button id="send">Новое сообщение</button>
+<button id="retry">Повтор с тем же commandId</button>
+<button id="conflict">Тот же commandId, изменённый текст</button>
+<button id="clear">Очистить журнал</button>
+<pre id="log" aria-live="polite"></pre>
+<script>
+"use strict";
+const el = id => document.getElementById(id);
+let socket;
+let last;
+let logLines = [];
+function redact(value) {
+  if (Array.isArray(value)) return value.map(redact);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) =>
+      [key, /token|authorization/i.test(key) ? "[скрыто]" : redact(item)]));
+  }
+  return value;
+}
+function log(label, value) {
+  const detail = value === undefined ? "" : " " + JSON.stringify(redact(value), null, 2);
+  logLines.push(new Date().toLocaleTimeString() + " " + label + detail);
+  logLines = logLines.slice(-100);
+  el("log").textContent = logLines.join("\n");
+}
+function transmit(message) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return log("Нет соединения");
+  const token = el("token").value;
+  if (!token) return log("Введи токен");
+  socket.send(JSON.stringify({...message, token}));
+  log("→", message);
+}
+el("connect").onclick = () => {
+  if (socket && socket.readyState < WebSocket.CLOSING) return log("Соединение уже открывается или открыто");
+  if (!el("token").value) return log("Введи токен");
+  last = undefined;
+  try { socket = new WebSocket(el("url").value); }
+  catch (_) { return log("Некорректный WebSocket URL"); }
+  el("status").textContent = "Подключение…";
+  socket.onopen = () => { el("status").textContent = "Подключено"; transmit({type: "getState", payload: {}}); };
+  socket.onclose = event => { el("status").textContent = "Отключено, код " + event.code; log("Соединение закрыто"); };
+  socket.onerror = () => log("Ошибка WebSocket: проверь URL, Gateway и разрешённые Origin");
+  socket.onmessage = event => {
+    let message;
+    try { message = JSON.parse(event.data); }
+    catch (_) { return log("Получен ответ не в JSON"); }
+    if (message.type === "pig") {
+      socket.send(JSON.stringify({type: "pong", pigId: message.pigId}));
+      return;
+    }
+    log("←", message);
+  };
+};
+el("disconnect").onclick = () => socket && socket.close();
+el("state").onclick = () => transmit({type: "getState", payload: {}});
+el("seq").onclick = () => transmit({type: "getChatSeq", payload: {}});
+el("send").onclick = () => {
+  last = {type: "sendMessage", commandId: "browser-" + crypto.randomUUID(), payload: {text: el("text").value}};
+  transmit(last);
+};
+el("retry").onclick = () => last ? transmit(last) : log("Сначала отправь сообщение");
+el("conflict").onclick = () => last ? transmit({...last, payload: {text: last.payload.text + " [изменено]"}}) : log("Сначала отправь сообщение");
+el("clear").onclick = () => { logLines = []; el("log").textContent = ""; };
+</script>
+</html>

@@ -1,0 +1,9 @@
+.git
+.local
+.env
+.env.*
+!.env.example
+**/*_test.go
+docs
+scripts
+README.md

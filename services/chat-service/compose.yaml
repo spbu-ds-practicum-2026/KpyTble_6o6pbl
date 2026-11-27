@@ -1,0 +1,64 @@
+services:
+  chat-db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: chatdb
+      POSTGRES_USER: chat
+      POSTGRES_PASSWORD: chat-local
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - chat_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chat -d chatdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  chat-migrate:
+    profiles: ["app"]
+    image: plotina-chat:local
+    build: .
+    command: ["/app/chat-migrate"]
+    environment:
+      CHAT_DATABASE_URL: postgres://chat:chat-local@chat-db:5432/chatdb?sslmode=disable
+    depends_on:
+      chat-db:
+        condition: service_healthy
+
+  chat:
+    profiles: ["app"]
+    image: plotina-chat:local
+    build: .
+    environment:
+      HTTP_ADDR: 0.0.0.0:6767
+      CHAT_DATABASE_URL: postgres://chat:chat-local@chat-db:5432/chatdb?sslmode=disable
+      ROOM_SERVICE_URL: ${ROOM_SERVICE_DOCKER_URL:-http://host.docker.internal:8000}
+    ports:
+      - "${CHAT_BIND_IP:-127.0.0.1}:${CHAT_PORT:-6767}:6767"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      chat-db:
+        condition: service_healthy
+      chat-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:6767/ready"]
+      interval: 10s
+      timeout: 4s
+      retries: 3
+      start_period: 10s
+
+  chat-web:
+    profiles: ["web"]
+    image: plotina-chat:local
+    build: .
+    command: ["/app/chat-web"]
+    environment:
+      CHAT_WEB_ADDR: 0.0.0.0:8099
+    ports:
+      - "127.0.0.1:8099:8099"
+
+volumes:
+  chat_pgdata:

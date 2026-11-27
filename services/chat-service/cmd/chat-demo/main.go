@@ -5,6 +5,8 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strconv"
@@ -14,22 +16,53 @@ import (
 	"plotina/chat-service/internal/chat"
 	"plotina/chat-service/internal/rooms"
 	"plotina/chat-service/internal/storage"
+	"plotina/chat-service/internal/storage/postgres"
 )
 
 type demoUser struct {
-	roomID string
-	token  string
+	roomID        string
+	token         string
+	participantID string
+	role          chat.Role
 }
 
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "Ошибка демонстрации:", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	users := map[string]demoUser{
-		"user-1": {roomID: "room-1", token: "demo-token-1"},
+		"user-1": {roomID: "room-1", token: "demo-token-1", participantID: "participant-1", role: chat.RoleHost},
 	}
 	sessions := make(map[string]chat.Membership, len(users))
 	for id, user := range users {
-		sessions[user.token] = chat.Membership{RoomID: user.roomID, UserID: id}
+		sessions[user.token] = chat.Membership{
+			RoomID: user.roomID, ParticipantID: user.participantID,
+			DisplayName: id, Role: user.role, Connected: true,
+		}
 	}
-	messageStorage := storage.NewMemoryRepository()
+	var messageStorage chat.MessageRepository = storage.NewMemoryRepository()
+	if databaseURL := os.Getenv("CHAT_DATABASE_URL"); databaseURL != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		pool, err := postgres.Open(ctx, databaseURL)
+		cancel()
+		if err != nil {
+			return err
+		}
+		defer pool.Close()
+		messageStorage = postgres.NewRepository(pool)
+		fmt.Println("Хранилище: PostgreSQL. Перед первым запуском примени миграции.")
+	} else {
+		fmt.Println("Хранилище: память. Данные будут потеряны после выхода.")
+	}
+	var runID [16]byte
+	if _, err := rand.Read(runID[:]); err != nil {
+		return fmt.Errorf("создать идентификатор запуска: %w", err)
+	}
+	commandPrefix := "demo-" + hex.EncodeToString(runID[:])
 	service := chat.NewService(rooms.NewFakeMembershipChecker(sessions), messageStorage)
 	userID := "user-1"
 	var lastCommand *chat.SendCommand
@@ -46,7 +79,7 @@ func main() {
 		input := strings.TrimSpace(line)
 		switch {
 		case input == "/quit":
-			return
+			return nil
 		case input == "/help":
 			printHelp()
 			continue
@@ -62,7 +95,10 @@ func main() {
 				continue
 			}
 			newUserID, newUser := addUserToRoom(users, roomNumber)
-			sessions[newUser.token] = chat.Membership{RoomID: newUser.roomID, UserID: newUserID}
+			sessions[newUser.token] = chat.Membership{
+				RoomID: newUser.roomID, ParticipantID: newUser.participantID,
+				DisplayName: newUserID, Role: newUser.role, Connected: true,
+			}
 			// The fake checker copies sessions, so refresh it while retaining messages.
 			service = chat.NewService(rooms.NewFakeMembershipChecker(sessions), messageStorage)
 			fmt.Printf("Добавлен %s в %s. Переключиться: /as %s\n", newUserID, newUser.roomID, newUserID)
@@ -83,7 +119,7 @@ func main() {
 			continue
 		case input == "/users":
 			for id, user := range users {
-				fmt.Printf("%s -> комната: %s, токен: %s\n", id, user.roomID, user.token)
+				fmt.Printf("%s -> комната: %s, participant_id: %s, роль: %s, токен: %s\n", id, user.roomID, user.participantID, user.role, user.token)
 			}
 			continue
 		case input == "/retry":
@@ -101,35 +137,36 @@ func main() {
 		commandNumber++
 		command := chat.SendCommand{
 			RoomID:       users[userID].roomID,
-			UserID:       userID,
 			SessionToken: users[userID].token,
-			CommandID:    fmt.Sprintf("demo-%d", commandNumber),
+			CommandID:    fmt.Sprintf("%s-%d", commandPrefix, commandNumber),
 			Text:         line,
 		}
 		lastCommand = &command
 		send(service, command)
 	}
 	if err := scanner.Err(); err != nil {
-		fmt.Fprintln(os.Stderr, "Ошибка чтения ввода:", err)
-		os.Exit(1)
+		return fmt.Errorf("чтение ввода: %w", err)
 	}
+	return nil
 }
 
 func send(service *chat.Service, command chat.SendCommand) {
-	result, err := service.SendMessage(context.Background(), command)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, err := service.SendMessage(ctx, command)
 	if err != nil {
 		fmt.Println("Ошибка:", err)
 		return
 	}
 	message := result.Message
-	fmt.Printf("  commandId:  %s\n", result.CommandID)
-	fmt.Printf("  duplicate:  %t\n", result.Duplicate)
-	fmt.Printf("  messageId:  %s\n", message.MessageID)
-	fmt.Printf("  roomId:     %s\n", message.RoomID)
-	fmt.Printf("  userId:     %s\n", message.UserID)
-	fmt.Printf("  text:       %q\n", message.Text)
-	fmt.Printf("  messageSeq: %d\n", message.MessageSeq)
-	fmt.Printf("  sentAt:     %s\n\n", message.SentAt.Format(time.RFC3339Nano))
+	fmt.Printf("  command_id:     %s\n", result.CommandID)
+	fmt.Printf("  duplicate:      %t\n", result.Duplicate)
+	fmt.Printf("  message_id:     %s\n", message.MessageID)
+	fmt.Printf("  room_id:        %s\n", message.RoomID)
+	fmt.Printf("  participant_id: %s\n", message.ParticipantID)
+	fmt.Printf("  text:           %q\n", message.Text)
+	fmt.Printf("  messageSeq:     %d\n", message.MessageSeq)
+	fmt.Printf("  created_at:     %s\n\n", message.CreatedAt.Format(time.RFC3339Nano))
 }
 
 func printHelp() {
@@ -149,8 +186,10 @@ func addUserToRoom(users map[string]demoUser, roomNumber int) (string, demoUser)
 
 	userID := "user-" + idStr
 	newUser := demoUser{
-		roomID: "room-" + strconv.Itoa(roomNumber),
-		token:  "demo-token-" + idStr,
+		roomID:        "room-" + strconv.Itoa(roomNumber),
+		token:         "demo-token-" + idStr,
+		participantID: "participant-" + idStr,
+		role:          chat.RoleMember,
 	}
 
 	users[userID] = newUser
